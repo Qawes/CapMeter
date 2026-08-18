@@ -5,11 +5,11 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-#define I2C_SDA_PIN 1
-#define I2C_SCL_PIN 2
+#define I2C_SDA_PIN 41
+#define I2C_SCL_PIN 40
 
 #define SAMPLE_RATE   FDC1004_RATE_100HZ
-#define DEFAULT_CAPDAC 17
+#define DEFAULT_CAPDAC 0
 
 // Teljes szabványos Nordic UART Service (NUS)
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
