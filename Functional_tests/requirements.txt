@@ -1,0 +1,5 @@
+gTTS
+audioop-lts
+numpy
+pydub
+scipy
