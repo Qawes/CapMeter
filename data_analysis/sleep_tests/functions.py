@@ -110,8 +110,73 @@ def plot_raw_data(measurement: MeasurementData):
     plt.legend()
     plt.grid(True)
     plt.show()
-    
-    
+
+
+def plot_moving_rms(
+    measurement: MeasurementData,
+    window_size: int,
+    ylim: tuple[float, float] | None = None,
+):
+    """Plot the moving RMS of consecutive capacitance differences.
+
+    The RMS is calculated from the squared difference between consecutive
+    samples, averaged over ``window_size`` samples, and square-rooted.
+    Values before the first complete window are left as NaN.
+    """
+    if window_size < 1:
+        raise ValueError("window_size must be a positive integer")
+
+    capacitance_1_difference_squared = measurement.capacitance_1.diff().pow(2)
+    capacitance_2_difference_squared = measurement.capacitance_2.diff().pow(2)
+
+    capacitance_1_rms = np.sqrt(
+        capacitance_1_difference_squared.rolling(
+            window=window_size,
+            min_periods=window_size,
+        ).mean()
+    )
+    capacitance_2_rms = np.sqrt(
+        capacitance_2_difference_squared.rolling(
+            window=window_size,
+            min_periods=window_size,
+        ).mean()
+    )
+
+    fig_rms, axes_rms = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+
+    axes_rms[0].plot(
+        measurement.time_min,
+        capacitance_1_rms,
+        color="tab:blue",
+    )
+    axes_rms[0].set_ylabel("RMS difference (pF)")
+    axes_rms[0].set_title(
+        f"{measurement.capacitance_1_key} – moving RMS of consecutive differences "
+        f"(window size: {window_size})"
+    )
+    axes_rms[0].grid(True)
+
+    axes_rms[1].plot(
+        measurement.time_min,
+        capacitance_2_rms,
+        color="tab:orange",
+    )
+    axes_rms[1].set_xlabel("Elapsed time (minutes)")
+    axes_rms[1].set_ylabel("RMS difference (pF)")
+    axes_rms[1].set_title(
+        f"{measurement.capacitance_2_key} – moving RMS of consecutive differences "
+        f"(window size: {window_size})"
+    )
+    axes_rms[1].grid(True)
+
+    if ylim is not None:
+        axes_rms[0].set_ylim(ylim)
+        axes_rms[1].set_ylim(ylim)
+
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_filtered_data(measurement: MeasurementData, cutoff_frequency):
 
     filter_order = 4
