@@ -41,12 +41,12 @@ def generate_announcement(direction, freq, language):
 
     return generate_speech(text, language)
 
-def generate_break_announcement(language):
-    """Elkészíti a hosszú szünet kezdetét jelző bemondást."""
+def generate_end_announcement(language):
+    """Elkészíti a hangsáv végét jelző bemondást."""
     text = (
-        "Egy perc szünet következik."
+        "A hangsáv véget ért."
         if language == "hu"
-        else "A one-minute break will now begin."
+        else "The audio track has ended."
     )
     return generate_speech(text, language)
 
@@ -111,7 +111,7 @@ def build_test_audio(
 # Irányok: 'LR' (jobbra-balra), 'UD' (föl-le)
 # [(irány, Hz, másodperc)]
 tasks = [
-    ('LR', 2.0, 10),
+    #('LR', 2.0, 10),
     ('UD', 1.0, 10),
     ('LR', 0.5, 10),
     ('UD', 0.5, 10),
@@ -137,19 +137,13 @@ first_block_audio = build_test_audio(
 second_block_audio = build_test_audio(
     second_block_tasks, rest_duration=20, language=LANGUAGE, announcement_pause=2
 )
-long_break_duration = 60
-break_announcement = generate_break_announcement(LANGUAGE)
-break_samples = sample_rate * long_break_duration
-if len(break_announcement) > break_samples:
-    raise ValueError("A hosszú szünet bemondása hosszabb egy percnél.")
-block_break = np.concatenate(
-    (
-        np.rint(break_announcement * 32767).astype(np.int16),
-        np.zeros(break_samples - len(break_announcement), dtype=np.int16),
-    )
-)
+normal_break_duration = 0
+block_break = np.zeros(sample_rate * normal_break_duration, dtype=np.int16)
+end_announcement = np.rint(
+    generate_end_announcement(LANGUAGE) * 32767
+).astype(np.int16)
 audio_data = np.concatenate(
-    (first_block_audio, block_break, second_block_audio)
+    (first_block_audio, block_break, second_block_audio, end_announcement)
 )
 filename = f'Functional_tests/alvas_1_teszt_{LANGUAGE}_seed_{random_seed}.wav'
 wavfile.write(filename, 44100, audio_data)
