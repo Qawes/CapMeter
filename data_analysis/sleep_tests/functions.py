@@ -177,6 +177,75 @@ def plot_moving_rms(
     plt.show()
 
 
+def plot_sleep_classification(
+    measurement: MeasurementData,
+    window_size: int,
+    rms_threshold: float,
+):
+    """Plot binary sleep classification based on moving RMS.
+
+    A sample is classified as sleep (1) when its moving RMS of consecutive
+    capacitance differences is greater than ``rms_threshold``. Samples before
+    the first complete window are classified as not sleep (0).
+    """
+    if window_size < 1:
+        raise ValueError("window_size must be a positive integer")
+    if rms_threshold < 0:
+        raise ValueError("rms_threshold must be non-negative")
+
+    capacitance_1_rms = np.sqrt(
+        measurement.capacitance_1.diff()
+        .pow(2)
+        .rolling(window=window_size, min_periods=window_size)
+        .mean()
+    )
+    capacitance_2_rms = np.sqrt(
+        measurement.capacitance_2.diff()
+        .pow(2)
+        .rolling(window=window_size, min_periods=window_size)
+        .mean()
+    )
+
+    capacitance_1_sleep = (capacitance_1_rms > rms_threshold).fillna(False).astype(int)
+    capacitance_2_sleep = (capacitance_2_rms > rms_threshold).fillna(False).astype(int)
+
+    fig_sleep, axes_sleep = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
+
+    axes_sleep[0].step(
+        measurement.time_min,
+        capacitance_1_sleep,
+        where="post",
+        color="tab:blue",
+    )
+    axes_sleep[0].set_ylabel("Sleep")
+    axes_sleep[0].set_title(
+        f"{measurement.capacitance_1_key} – sleep classification "
+        f"(window size: {window_size}, RMS threshold: {rms_threshold})"
+    )
+    axes_sleep[0].set_yticks([0, 1])
+    axes_sleep[0].set_ylim(-0.1, 1.1)
+    axes_sleep[0].grid(True)
+
+    axes_sleep[1].step(
+        measurement.time_min,
+        capacitance_2_sleep,
+        where="post",
+        color="tab:orange",
+    )
+    axes_sleep[1].set_xlabel("Elapsed time (minutes)")
+    axes_sleep[1].set_ylabel("Movement")
+    axes_sleep[1].set_title(
+        f"{measurement.capacitance_2_key} – sleep classification "
+        f"(window size: {window_size}, RMS threshold: {rms_threshold})"
+    )
+    axes_sleep[1].set_yticks([0, 1])
+    axes_sleep[1].set_ylim(-0.1, 1.1)
+    axes_sleep[1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_filtered_data(measurement: MeasurementData, cutoff_frequency):
 
     filter_order = 4
