@@ -1,0 +1,99 @@
+(footprint "Névtelen_1"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at 0 -0.5 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "1b8ebca1-ef54-4438-8f68-5e5f21936ce8")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+		)
+	)
+	(property "Value" "Névtelen_1"
+		(at 0 1 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "44e1e141-3aa1-46c8-9e67-85a04e5618f9")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "381b5f1e-5ce3-47a9-ac0f-7981e4727b7d")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "17efa122-8600-440e-aa7e-40d4054bd448")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(duplicate_pad_numbers_are_jumpers no)
+	(fp_text user "${REFERENCE}"
+		(at 0 2.5 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "e65d4d04-ce7d-4934-8af9-0ea2f35daf98")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd roundrect
+		(at 0 -3.81)
+		(size 2.54 1.27)
+		(layers "*.Mask" "F.Cu")
+		(roundrect_rratio 0.15)
+		(uuid "20dc661c-0f61-4f44-a86d-cf4f92710008")
+	)
+	(pad "2" smd roundrect
+		(at 0 -1.27)
+		(size 2.54 1.27)
+		(layers "*.Mask" "F.Cu")
+		(roundrect_rratio 0.15)
+		(uuid "c2c7f727-fc24-4a1c-8a0b-f3b7c4f496b4")
+	)
+	(pad "3" smd roundrect
+		(at 0 1.27)
+		(size 2.54 1.27)
+		(layers "*.Mask" "F.Cu")
+		(roundrect_rratio 0.15)
+		(uuid "0f0fc7eb-9b91-4320-9d71-dc5203d6fa97")
+	)
+	(pad "4" smd roundrect
+		(at 0 3.81)
+		(size 2.54 1.27)
+		(layers "*.Mask" "F.Cu")
+		(roundrect_rratio 0.15)
+		(uuid "cfedfd6e-2262-4e73-8853-de3e3ad6dd1a")
+	)
+	(embedded_fonts no)
+)
