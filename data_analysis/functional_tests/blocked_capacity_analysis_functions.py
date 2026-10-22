@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Sequence
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
 
@@ -144,14 +145,30 @@ def plot_capacity_analysis(
     ylim: tuple[float, float] | None = None,
     offset_seconds: float = 0,
     end_padding_seconds: float = 10,
-) -> tuple[plt.Figure, plt.Axes, pd.DataFrame]:
+    rms_window_size: int | None = None,
+    rms_threshold: float | None = None,
+    return_objects: bool = False,
+) -> tuple[plt.Figure, plt.Axes, pd.DataFrame] | None:
     """Create a capacity plot and return the figure, axes, and timeline table.
 
     ``offset_seconds`` shifts the timeline sections relative to the CSV time axis.
     Positive values move them right; negative values move them left.
     ``end_padding_seconds`` controls how long the plot continues after the
     final movement section.
+    When both ``rms_window_size`` and ``rms_threshold`` are provided, the
+    moving-RMS sleep classification is plotted on a secondary Y-axis.
+    Set ``return_objects`` to ``True`` to return the figure, axes, and
+    timeline table.
     """
+    if (rms_window_size is None) != (rms_threshold is None):
+        raise ValueError(
+            "rms_window_size and rms_threshold must be provided together."
+        )
+    if rms_window_size is not None and rms_window_size < 1:
+        raise ValueError("rms_window_size must be a positive integer.")
+    if rms_threshold is not None and rms_threshold < 0:
+        raise ValueError("rms_threshold must be non-negative.")
+
     data, capacitance_columns = load_measurements(csv_path)
     sections_df, audio_end = build_timeline(
         first_block_tasks,
@@ -170,12 +187,6 @@ def plot_capacity_analysis(
     if plot_data.empty:
         raise ValueError("The CSV contains no measurements before the plot end.")
 
-    print(f"Mérési pontok: {len(data):,}")
-    print(f"Mérési idő: {data['time_seconds'].iloc[-1]:.1f} s")
-    print(f"A hang időzítési modelljének hossza: {audio_end:.1f} s")
-    if data["time_seconds"].iloc[-1] < audio_end:
-        print("Figyelem: a CSV rövidebb, mint a megadott audio időzítése.")
-
     colors = {
         "baseline": "#bdbdbd",
         "rest": "#ffe0b2",
@@ -191,6 +202,38 @@ def plot_capacity_analysis(
             linewidth=0.8,
             label=column,
         )
+
+    classification_axis = None
+    classification_lines = []
+    if rms_window_size is not None and rms_threshold is not None:
+        classification_axis = ax.twinx()
+        classification_axis.set_ylabel("Alvásbesorolás")
+        classification_axis.set_yticks([0, 1])
+        classification_axis.set_ylim(-0.1, 1.1)
+
+        classification_colors = ("tab:purple", "tab:brown")
+        for column, color in zip(capacitance_columns[:2], classification_colors):
+            rms = np.sqrt(
+                data[column]
+                .diff()
+                .pow(2)
+                .rolling(
+                    window=rms_window_size,
+                    min_periods=rms_window_size,
+                )
+                .mean()
+            )
+            classification = (rms > rms_threshold).fillna(False).astype(int)
+            line = classification_axis.step(
+                plot_data["time_seconds"],
+                classification.loc[plot_data.index],
+                where="post",
+                color=color,
+                alpha=0.8,
+                linewidth=1.2,
+                label=f"{column} alvásbesorolás",
+            )[0]
+            classification_lines.append(line)
 
     y_min = plot_data[capacitance_columns].min().min()
     y_max = plot_data[capacitance_columns].max().max()
@@ -239,6 +282,7 @@ def plot_capacity_analysis(
                 plt.Line2D([], [], color=line.get_color(), label=line.get_label())
                 for line in ax.lines
             ],
+            *classification_lines,
             Patch(facecolor=colors["baseline"], alpha=0.5, label="Baseline"),
             Patch(
                 facecolor=colors["rest"],
@@ -255,4 +299,6 @@ def plot_capacity_analysis(
         loc="upper right",
     )
     fig.tight_layout()
-    return fig, ax, sections_df
+    if return_objects:
+        return fig, ax, sections_df
+    return None
