@@ -223,7 +223,10 @@ def plot_capacity_analysis(
                 )
                 .mean()
             )
-            classification = (rms > rms_threshold).fillna(False).astype(int)
+            classification = pd.Series(
+                rms > rms_threshold,
+                index=data.index,
+            ).fillna(False).astype(int)
             line = classification_axis.step(
                 plot_data["time_seconds"],
                 classification.loc[plot_data.index],
