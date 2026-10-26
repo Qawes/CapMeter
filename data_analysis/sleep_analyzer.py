@@ -36,6 +36,7 @@ PLOT_NAMES = (
 )
 MOVEMENT_STATES = ("still", "movement", "strong movement")
 STRONG_MOVEMENT_THRESHOLD = 0.7
+HEART_RATE_RMSDD_MOVEMENT_THRESHOLD = 0.7
 
 
 def _local_timestamp(value: DateLike) -> pd.Timestamp:
@@ -202,13 +203,18 @@ def _predict_movement(
     rms_window_size: int = 20,
     cin2_threshold: float = 0.065,
     cin4_threshold: float = 0.09,
+    heart_rate_rmsdd: pd.Series | None = None,
 ) -> pd.DataFrame:
     if not isinstance(rms_window_size, int) or rms_window_size < 1:
         raise ValueError("rms_window_size must be a positive integer.")
     if cin2_threshold < 0 or cin4_threshold < 0:
         raise ValueError("Channel thresholds must be non-negative.")
+    if heart_rate_rmsdd is not None and not heart_rate_rmsdd.index.equals(fdc.index):
+        raise ValueError("heart_rate_rmsdd must use the same index as fdc.")
 
     result = fdc.copy()
+    if heart_rate_rmsdd is not None:
+        result["heart_rate_rmsdd"] = heart_rate_rmsdd
     rmsdd = {}
     for column in ("CIN2_pF", "CIN4_pF"):
         rmsdd[column] = _rolling_rmsdd(result[column], rms_window_size)
@@ -225,6 +231,13 @@ def _predict_movement(
         | (result["CIN4_rmsdd"] > STRONG_MOVEMENT_THRESHOLD)
     ).fillna(False)
     movement = result["CIN2_movement"] | result["CIN4_movement"]
+    if heart_rate_rmsdd is not None:
+        low_heart_rate_rmsdd = (
+            result["heart_rate_rmsdd"]
+            < HEART_RATE_RMSDD_MOVEMENT_THRESHOLD
+        ).fillna(False)
+        movement = movement & ~low_heart_rate_rmsdd
+        strong_movement = strong_movement & ~low_heart_rate_rmsdd
     result["movement_prediction"] = np.select(
         [strong_movement, movement],
         ["strong movement", "movement"],
@@ -285,18 +298,11 @@ def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
         columns=list(MOVEMENT_STATES),
         fill_value=0,
     )
-    table = table.rename(
-        columns={
-            "still": "still_count",
-            "movement": "movement_count",
-            "strong movement": "strong_movement_count",
-        }
-    )
     table["phase_vs_sleep_%"] = table.sum(axis=1) / table.to_numpy().sum() * 100
-    count_columns = ["still_count", "movement_count", "strong_movement_count"]
+    count_columns = list(MOVEMENT_STATES)
     phase_totals = table[count_columns].sum(axis=1)
-    table["movement_%"] = table["movement_count"] / phase_totals * 100
-    table["strong_movement_%"] = table["strong_movement_count"] / phase_totals * 100
+    table["movement_%"] = table["movement"] / phase_totals * 100
+    table["strong_movement_%"] = table["strong movement"] / phase_totals * 100
     table["mean_CIN2_rmsdd"] = values.groupby("phase")["CIN2_rmsdd"].mean().reindex(table.index)
     table["mean_CIN4_rmsdd"] = values.groupby("phase")["CIN4_rmsdd"].mean().reindex(table.index)
     movement_values = values["movement_prediction"].isin(
@@ -309,19 +315,33 @@ def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
         ).total_seconds()).reindex(table.index)
     )
     table["average_movement_per_s"] = movement_counts / phase_duration
-    total_movement = table["movement_count"].sum()
-    total_strong_movement = table["strong_movement_count"].sum()
+    total_movement = table["movement"].sum()
+    total_strong_movement = table["strong movement"].sum()
     table["movement_vs_all_movement_%"] = (
-        table["movement_count"] / total_movement * 100
+        table["movement"] / total_movement * 100
         if total_movement
         else np.nan
     )
     table["strong_movement_vs_all_strong_movement_%"] = (
-        table["strong_movement_count"] / total_strong_movement * 100
+        table["strong movement"] / total_strong_movement * 100
         if total_strong_movement
         else np.nan
     )
-    return table
+    return table.rename(
+        columns={
+            "still": "still count",
+            "movement": "movement count",
+            "strong movement": "strong movement count",
+            "phase_vs_sleep_%": "phase/whole sleep in [%]",
+            "movement_%": "movement/all points [%]",
+            "strong_movement_%": "strong movement/all points [%]",
+            "mean_CIN2_rmsdd": "mean C_2 RMSDD [pF]",
+            "mean_CIN4_rmsdd": "mean C_4 RMSDD [pF]",
+            "average_movement_per_s": "average movement per second [1/s]",
+            "movement_vs_all_movement_%": "movement/all movement [%]",
+            "strong_movement_vs_all_strong_movement_%": "strong movement/all strong movement [%]",
+        }
+    )
 
 
 def plot_sleep_data(
@@ -418,11 +438,42 @@ def plot_sleep_data(
 
     apple = _load_apple_watch(apple_path)
     polar = _load_polar(polar_paths[0])
+    raw_fdc = _load_fdc1004(fdc_path, fdc_start_time)
+    heart_rate_rmsdd = _rolling_rmsdd(
+        polar["HR (bpm)"],
+        heart_rate_rmsdd_window_size,
+    )
+    heart_rate_rmsdd_valid = polar["timestamp"].notna() & heart_rate_rmsdd.notna()
+    heart_rate_rmsdd_by_timestamp = pd.Series(
+        np.nan,
+        index=raw_fdc.index,
+        dtype=float,
+    )
+    if heart_rate_rmsdd_valid.any():
+        source_seconds = (
+            polar.loc[heart_rate_rmsdd_valid, "timestamp"]
+            - polar.loc[heart_rate_rmsdd_valid, "timestamp"].iloc[0]
+        ).dt.total_seconds().to_numpy()
+        target_seconds = (
+            raw_fdc["timestamp"]
+            - polar.loc[heart_rate_rmsdd_valid, "timestamp"].iloc[0]
+        ).dt.total_seconds().to_numpy()
+        source_values = heart_rate_rmsdd.loc[heart_rate_rmsdd_valid].to_numpy()
+        in_range = (
+            (target_seconds >= source_seconds[0])
+            & (target_seconds <= source_seconds[-1])
+        )
+        heart_rate_rmsdd_by_timestamp.loc[in_range] = np.interp(
+            target_seconds[in_range],
+            source_seconds,
+            source_values,
+        )
     fdc = _predict_movement(
-        _load_fdc1004(fdc_path, fdc_start_time),
+        raw_fdc,
         rms_window_size=capacitance_rmsdd_window_size,
         cin2_threshold=cin2_threshold,
         cin4_threshold=cin4_threshold,
+        heart_rate_rmsdd=heart_rate_rmsdd_by_timestamp,
     )
     apple = _add_apple_boundary_awake(
         apple,
@@ -430,10 +481,6 @@ def plot_sleep_data(
         fdc["timestamp"].max(),
     )
     fdc = _mark_sleep_stages(fdc, apple)
-    heart_rate_rmsdd = _rolling_rmsdd(
-        polar["HR (bpm)"],
-        heart_rate_rmsdd_window_size,
-    )
     heart_rate_band_times, low_frequency, high_frequency = _heart_rate_frequency_bands(
         polar
     )
