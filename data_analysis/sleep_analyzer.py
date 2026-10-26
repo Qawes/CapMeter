@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Sequence, TypeAlias
+from typing import Mapping, Sequence, TypeAlias
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -22,7 +22,16 @@ SLEEP_STAGE_NAMES = {
 }
 SLEEP_STAGE_LABELS = ["Awake", "REM", "Core", "Deep"]
 SLEEP_STAGE_COLORS = ["#f28e2b", "#f1c40f", "#2878b5", "#12355b"]
-PLOT_NAMES = ("sleep_stages", "heart_rate", "capacitance", "rms", "movement")
+PLOT_NAMES = (
+    "sleep_stages",
+    "heart_rate",
+    "heart_rate_rmsdd",
+    "capacitance",
+    "capacitance_difference_mean",
+    "rmsdd",
+    "movement",
+    "movement_count",
+)
 MOVEMENT_STATES = ("still", "movement", "strong movement")
 STRONG_MOVEMENT_THRESHOLD = 0.7
 
@@ -77,6 +86,55 @@ def _load_fdc1004(path: Path, start_time: DateLike) -> pd.DataFrame:
     return data.dropna(subset=["timestamp"]).reset_index(drop=True)
 
 
+def _add_apple_boundary_awake(
+    apple: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Represent missing Apple Watch coverage at the FDC boundaries as Awake."""
+    columns = list(apple.columns)
+    if apple.empty:
+        return pd.DataFrame(
+            [{"Sleep stage": "Awake", "Start time": start, "End time": end}],
+            columns=columns,
+        )
+
+    apple = apple.sort_values("Start time").reset_index(drop=True)
+    fill_rows = []
+    if apple.iloc[0]["Start time"] > start:
+        fill_rows.append(
+            {"Sleep stage": "Awake", "Start time": start, "End time": apple.iloc[0]["Start time"]}
+        )
+    if apple.iloc[-1]["End time"] < end:
+        fill_rows.append(
+            {"Sleep stage": "Awake", "Start time": apple.iloc[-1]["End time"], "End time": end}
+        )
+    if fill_rows:
+        apple = pd.concat([apple, pd.DataFrame(fill_rows, columns=columns)], ignore_index=True)
+        apple = apple.sort_values("Start time").reset_index(drop=True)
+    return apple
+
+
+def _rolling_rmsdd(series: pd.Series, window: int) -> pd.Series:
+    """Calculate rolling RMS of successive differences."""
+    differences = series.interpolate(limit_direction="both").diff()
+    differences = differences.mask(differences.abs() > 4, 0)
+    return (
+        differences
+        .pow(2)
+        .rolling(window=window, min_periods=window)
+        .mean()
+        .pow(0.5)
+    )
+
+
+def _rolling_difference_mean(series: pd.Series, window: int) -> pd.Series:
+    """Calculate the rolling mean of absolute successive differences."""
+    differences = series.interpolate(limit_direction="both").diff().abs()
+    differences = differences.mask(differences.abs() > 4, 0)
+    return differences.rolling(window=window, min_periods=window).mean()
+
+
 def _predict_movement(
     fdc: pd.DataFrame,
     *,
@@ -90,25 +148,20 @@ def _predict_movement(
         raise ValueError("Channel thresholds must be non-negative.")
 
     result = fdc.copy()
-    rms = {}
+    rmsdd = {}
     for column in ("CIN2_pF", "CIN4_pF"):
-        values = result[column].interpolate(limit_direction="both")
-        rms[column] = (
-            values.diff()
-            .pow(2)
-            .rolling(window=rms_window_size, min_periods=rms_window_size)
-            .mean()
-            .pow(0.5)
-        )
+        rmsdd[column] = _rolling_rmsdd(result[column], rms_window_size)
 
-    rms = pd.DataFrame(rms, index=result.index)
-    result["CIN2_rms"] = rms["CIN2_pF"]
-    result["CIN4_rms"] = rms["CIN4_pF"]
-    result["CIN2_movement"] = (result["CIN2_rms"] > cin2_threshold).fillna(False)
-    result["CIN4_movement"] = (result["CIN4_rms"] > cin4_threshold).fillna(False)
+    rmsdd = pd.DataFrame(rmsdd, index=result.index)
+    result["CIN2_rmsdd"] = rmsdd["CIN2_pF"]
+    result["CIN4_rmsdd"] = rmsdd["CIN4_pF"]
+    result["CIN2_rmsdd"] = result["CIN2_rmsdd"]#.pow(0.5)
+    result["CIN4_rmsdd"] = result["CIN4_rmsdd"]#.pow(0.5)
+    result["CIN2_movement"] = (result["CIN2_rmsdd"] > cin2_threshold).fillna(False)
+    result["CIN4_movement"] = (result["CIN4_rmsdd"] > cin4_threshold).fillna(False)
     strong_movement = (
-        (result["CIN2_rms"] > STRONG_MOVEMENT_THRESHOLD)
-        | (result["CIN4_rms"] > STRONG_MOVEMENT_THRESHOLD)
+        (result["CIN2_rmsdd"] > STRONG_MOVEMENT_THRESHOLD)
+        | (result["CIN4_rmsdd"] > STRONG_MOVEMENT_THRESHOLD)
     ).fillna(False)
     movement = result["CIN2_movement"] | result["CIN4_movement"]
     result["movement_prediction"] = np.select(
@@ -122,6 +175,12 @@ def _predict_movement(
 def _mark_sleep_stages(fdc: pd.DataFrame, apple: pd.DataFrame) -> pd.DataFrame:
     result = fdc.copy()
     result["sleep_stage"] = pd.Series(pd.NA, index=result.index, dtype="string")
+    if not result.empty:
+        apple = _add_apple_boundary_awake(
+            apple,
+            result["timestamp"].min(),
+            result["timestamp"].max(),
+        )
     for _, sleep_row in apple.iterrows():
         in_stage = result["timestamp"].between(
             sleep_row["Start time"],
@@ -146,7 +205,15 @@ def _movement_rem_correlation(fdc: pd.DataFrame) -> float:
 
 
 def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
-    values = fdc[["sleep_stage", "movement_prediction"]].dropna()
+    values = fdc[
+        [
+            "timestamp",
+            "sleep_stage",
+            "movement_prediction",
+            "CIN2_rmsdd",
+            "CIN4_rmsdd",
+        ]
+    ].dropna(subset=["sleep_stage", "movement_prediction"])
     values = values.rename(columns={"sleep_stage": "phase"})
     table = pd.crosstab(
         values["phase"],
@@ -169,6 +236,18 @@ def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
     phase_totals = table[count_columns].sum(axis=1)
     table["movement_%"] = table["movement_count"] / phase_totals * 100
     table["strong_movement_%"] = table["strong_movement_count"] / phase_totals * 100
+    table["mean_CIN2_rmsdd"] = values.groupby("phase")["CIN2_rmsdd"].mean().reindex(table.index)
+    table["mean_CIN4_rmsdd"] = values.groupby("phase")["CIN4_rmsdd"].mean().reindex(table.index)
+    movement_values = values["movement_prediction"].isin(
+        ["movement", "strong movement"]
+    )
+    movement_counts = movement_values.groupby(values["phase"]).sum().reindex(table.index)
+    phase_duration = (
+        values.groupby("phase")["timestamp"].agg(lambda timestamps: (
+            timestamps.max() - timestamps.min()
+        ).total_seconds()).reindex(table.index)
+    )
+    table["average_movement_per_s"] = movement_counts / phase_duration
     total_movement = table["movement_count"].sum()
     total_strong_movement = table["strong_movement_count"].sum()
     table["movement_vs_all_movement_%"] = (
@@ -189,7 +268,12 @@ def plot_sleep_data(
     fdc_start_time: DateLike,
     *,
     data_directory: str | Path | None = None,
-    rms_window_size: int = 20,
+    rmsdd_window_size: int | None = 20,
+    heart_rate_rmsdd_window_size: int | None = None,
+    capacitance_rmsdd_window_size: int | None = None,
+    capacitance_difference_mean_window_size: int | None = None,
+    rmsdd_ylim: tuple[float, float] | None = None,
+    plot_ylims: Mapping[str, tuple[float, float]] | None = None,
     cin2_threshold: float = 0.065,
     cin4_threshold: float = 0.09,
     plots: Sequence[str] | None = None,
@@ -200,9 +284,47 @@ def plot_sleep_data(
     ``fdc_start_time`` is the absolute local start time of the FDC1004
     recording. The FDC1004 file contains elapsed timestamps only.
     ``plots`` selects panels by name. Supported names are
-    ``sleep_stages``, ``heart_rate``, ``capacitance``, ``rms``, and
-    ``movement``. By default, all panels are shown.
+    ``sleep_stages``, ``heart_rate``, ``heart_rate_rmsdd``, ``capacitance``,
+    ``capacitance_difference_mean``, ``rmsdd``, ``movement``, and
+    ``movement_count``. By default, all panels are shown.
+
+    ``rmsdd_window_size`` is retained as a compatibility default for both
+    RMSDD calculations. The dedicated window-size arguments override it.
     """
+    if heart_rate_rmsdd_window_size is None:
+        heart_rate_rmsdd_window_size = rmsdd_window_size
+    if capacitance_rmsdd_window_size is None:
+        capacitance_rmsdd_window_size = rmsdd_window_size
+    if capacitance_difference_mean_window_size is None:
+        capacitance_difference_mean_window_size = capacitance_rmsdd_window_size
+    if heart_rate_rmsdd_window_size is None or capacitance_rmsdd_window_size is None:
+        raise ValueError("At least one RMSDD window size must be provided.")
+    if not isinstance(heart_rate_rmsdd_window_size, int) or heart_rate_rmsdd_window_size < 1:
+        raise ValueError("heart_rate_rmsdd_window_size must be a positive integer.")
+    if not isinstance(capacitance_rmsdd_window_size, int) or capacitance_rmsdd_window_size < 1:
+        raise ValueError("capacitance_rmsdd_window_size must be a positive integer.")
+    if (
+        not isinstance(capacitance_difference_mean_window_size, int)
+        or capacitance_difference_mean_window_size < 1
+    ):
+        raise ValueError(
+            "capacitance_difference_mean_window_size must be a positive integer."
+        )
+    plot_ylims = dict(plot_ylims or {})
+    if rmsdd_ylim is not None:
+        plot_ylims.setdefault("rmsdd", rmsdd_ylim)
+    fixed_ylim_plots = {"sleep_stages", "movement"}
+    configured_fixed_ylim_plots = set(plot_ylims) & fixed_ylim_plots
+    if configured_fixed_ylim_plots:
+        raise ValueError(
+            "Y-limits cannot be configured for: "
+            f"{', '.join(sorted(configured_fixed_ylim_plots))}."
+        )
+    unknown_ylim_plots = set(plot_ylims) - set(PLOT_NAMES)
+    if unknown_ylim_plots:
+        raise ValueError(
+            f"Unknown plot y-limit(s): {', '.join(sorted(unknown_ylim_plots))}."
+        )
     selected_plots = tuple(PLOT_NAMES if plots is None else plots)
     unknown_plots = set(selected_plots) - set(PLOT_NAMES)
     if unknown_plots:
@@ -236,21 +358,43 @@ def plot_sleep_data(
     polar = _load_polar(polar_paths[0])
     fdc = _predict_movement(
         _load_fdc1004(fdc_path, fdc_start_time),
-        rms_window_size=rms_window_size,
+        rms_window_size=capacitance_rmsdd_window_size,
         cin2_threshold=cin2_threshold,
         cin4_threshold=cin4_threshold,
     )
+    apple = _add_apple_boundary_awake(
+        apple,
+        fdc["timestamp"].min(),
+        fdc["timestamp"].max(),
+    )
     fdc = _mark_sleep_stages(fdc, apple)
+    heart_rate_rmsdd = _rolling_rmsdd(
+        polar["HR (bpm)"],
+        heart_rate_rmsdd_window_size,
+    )
     correlation = _movement_rem_correlation(fdc)
     print("Sleep-phase movement statistics:")
-    print(_sleep_stage_statistics(fdc).to_string(float_format=lambda value: f"{value:.2f}"))
+    statistics = _sleep_stage_statistics(fdc)
+    print(
+        statistics.to_string(
+            float_format=lambda value: f"{value:.2f}",
+            formatters={
+                "mean_CIN2_rmsdd": lambda value: f"{value:.4f}",
+                "mean_CIN4_rmsdd": lambda value: f"{value:.4f}",
+                "average_movement_per_s": lambda value: f"{value:.4f}",
+            },
+        )
+    )
 
     height_ratios = {
         "sleep_stages": 1.4,
         "heart_rate": 1.2,
+        "heart_rate_rmsdd": 1.2,
         "capacitance": 2.0,
-        "rms": 1.5,
+        "capacitance_difference_mean": 1.5,
+        "rmsdd": 1.5,
         "movement": 1.0,
+        "movement_count": 1.0,
     }
     figure, axes = plt.subplots(
         len(selected_plots),
@@ -265,32 +409,29 @@ def plot_sleep_data(
 
     for axis, plot_name in zip(axes, selected_plots):
         if plot_name == "sleep_stages":
-            stage_times = []
-            stage_values = []
+            previous_stage_number = None
             for row in apple.itertuples():
                 stage_number = SLEEP_STAGE_NAMES[row._1]
-                if not stage_times:
-                    stage_times.append(row._2)
-                    stage_values.append(stage_number)
-                else:
-                    stage_times.append(row._2)
-                    stage_values.append(stage_number)
                 axis.axhspan(
                     stage_number - 0.5,
                     stage_number + 0.5,
                     color=SLEEP_STAGE_COLORS[stage_number],
                     alpha=0.35,
                 )
-            if stage_times:
-                stage_times.append(apple.iloc[-1]["End time"])
-                stage_values.append(stage_values[-1])
-                axis.step(
-                    stage_times,
-                    stage_values,
-                    where="post",
+                if previous_stage_number is not None:
+                    axis.plot(
+                        [row._2, row._2],
+                        [previous_stage_number, stage_number],
+                        color="black",
+                        linewidth=1.0,
+                    )
+                axis.plot(
+                    [row._2, row._3],
+                    [stage_number, stage_number],
                     color="black",
                     linewidth=1.0,
                 )
+                previous_stage_number = stage_number
             axis.set_ylabel("Sleep stage")
             axis.set_title(f"Sleep stages ({date_text})")
             axis.set_yticks(range(len(SLEEP_STAGE_LABELS)))
@@ -310,6 +451,20 @@ def plot_sleep_data(
             axis.set_title("Polar heart rate")
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
+        elif plot_name == "heart_rate_rmsdd":
+            axis.plot(
+                polar["timestamp"],
+                heart_rate_rmsdd,
+                color="tab:purple",
+                linewidth=1,
+                label="Heart-rate RMSDD",
+            )
+            axis.set_ylabel("HR RMSDD (bpm)")
+            axis.set_title(
+                f"Heart-rate RMSDD (window size: {heart_rate_rmsdd_window_size})"
+            )
+            axis.legend(loc="upper right")
+            axis.grid(True, alpha=0.3)
         elif plot_name == "capacitance":
             axis.plot(fdc["timestamp"], fdc["CIN2_pF"], label="CIN2", linewidth=0.8)
             axis.plot(fdc["timestamp"], fdc["CIN4_pF"], label="CIN4", linewidth=0.8)
@@ -317,13 +472,43 @@ def plot_sleep_data(
             axis.set_title("FDC1004 capacitance")
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
-        elif plot_name == "rms":
-            axis.plot(fdc["timestamp"], fdc["CIN2_rms"], label="CIN2 RMS", linewidth=0.8)
-            axis.plot(fdc["timestamp"], fdc["CIN4_rms"], label="CIN4 RMS", linewidth=0.8)
+        elif plot_name == "capacitance_difference_mean":
+            cin2_difference_mean = _rolling_difference_mean(
+                fdc["CIN2_pF"],
+                capacitance_difference_mean_window_size,
+            )
+            cin4_difference_mean = _rolling_difference_mean(
+                fdc["CIN4_pF"],
+                capacitance_difference_mean_window_size,
+            )
+            axis.plot(
+                fdc["timestamp"],
+                cin2_difference_mean,
+                label="CIN2 difference mean",
+                linewidth=0.8,
+            )
+            axis.plot(
+                fdc["timestamp"],
+                cin4_difference_mean,
+                label="CIN4 difference mean",
+                linewidth=0.8,
+            )
+            axis.set_ylabel("Mean difference (pF)")
+            axis.set_title(
+                "Capacitance difference rolling mean "
+                f"(window size: {capacitance_difference_mean_window_size})"
+            )
+            axis.legend(loc="upper right")
+            axis.grid(True, alpha=0.3)
+        elif plot_name == "rmsdd":
+            axis.plot(fdc["timestamp"], fdc["CIN2_rmsdd"], label="CIN2 RMSDD", linewidth=0.8)
+            axis.plot(fdc["timestamp"], fdc["CIN4_rmsdd"], label="CIN4 RMSDD", linewidth=0.8)
             axis.axhline(cin2_threshold, color="tab:blue", linestyle="--", alpha=0.6)
             axis.axhline(cin4_threshold, color="tab:orange", linestyle="--", alpha=0.6)
-            axis.set_ylabel("RMS (pF)")
-            axis.set_title(f"Moving RMS (window size: {rms_window_size})")
+            axis.set_ylabel("RMSDD (pF)")
+            axis.set_title(
+                f"RMSDD (window size: {capacitance_rmsdd_window_size})"
+            )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
         elif plot_name == "movement":
@@ -357,6 +542,24 @@ def plot_sleep_data(
             )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
+        elif plot_name == "movement_count":
+            movement_count = fdc["movement_prediction"].isin(
+                ["movement", "strong movement"]
+            ).rolling(window=20, min_periods=1).sum()
+            axis.plot(
+                fdc["timestamp"],
+                movement_count,
+                color="tab:green",
+                linewidth=1.2,
+                label="Movement count (last 20)",
+            )
+            axis.set_ylabel("Movement count")
+            axis.set_title("Movement count over last 20 measurements")
+            axis.legend(loc="upper right")
+            axis.grid(True, alpha=0.3)
+
+        if plot_name in plot_ylims:
+            axis.set_ylim(*plot_ylims[plot_name])
 
     all_times = pd.concat(
         [
