@@ -10,6 +10,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.signal import stft
 
 
 DateLike: TypeAlias = str | date | datetime | pd.Timestamp
@@ -26,6 +27,7 @@ PLOT_NAMES = (
     "sleep_stages",
     "heart_rate",
     "heart_rate_rmsdd",
+    "heart_rate_stft",
     "capacitance",
     # "capacitance_difference_mean",
     "rmsdd",
@@ -125,6 +127,65 @@ def _rolling_rmsdd(series: pd.Series, window: int) -> pd.Series:
         .rolling(window=window, min_periods=window)
         .mean()
         .pow(0.5)
+    )
+
+
+def _heart_rate_frequency_bands(
+    polar: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Integrate STFT heart-rate amplitude in the LF and HF bands."""
+    valid = polar.dropna(subset=["timestamp", "HR (bpm)"]).sort_values("timestamp")
+    if len(valid) < 2:
+        empty = pd.Series(dtype=float)
+        return empty, empty, empty
+
+    timestamps = valid["timestamp"]
+    sample_seconds = (timestamps - timestamps.iloc[0]).dt.total_seconds().to_numpy()
+    sample_rate = 1.0
+    regular_seconds = np.arange(
+        sample_seconds[0],
+        sample_seconds[-1] + 1 / sample_rate,
+        1 / sample_rate,
+    )
+    heart_rate = np.interp(
+        regular_seconds,
+        sample_seconds,
+        valid["HR (bpm)"].to_numpy(),
+    )
+    frequencies, times, spectrum = stft(
+        heart_rate,
+        fs=sample_rate,
+        window="hann",
+        nperseg=256,
+        noverlap=256-32,
+        boundary=None,
+    )
+    amplitude = np.abs(spectrum)
+    low_frequency = np.trapz(
+        amplitude[(frequencies >= 0.04) & (frequencies < 0.15)],
+        frequencies[(frequencies >= 0.04) & (frequencies < 0.15)],
+        axis=0,
+    )
+    high_frequency = np.trapz(
+        amplitude[(frequencies >= 0.15) & (frequencies <= 0.4)],
+        frequencies[(frequencies >= 0.15) & (frequencies <= 0.4)],
+        axis=0,
+    )
+    plot_timestamps = pd.Series(
+        timestamps.iloc[0] + pd.to_timedelta(times, unit="s")
+    )
+    low_frequency = pd.Series(low_frequency).rolling(
+        window=1,
+        min_periods=1,
+    ).mean()
+    high_frequency = pd.Series(high_frequency).rolling(
+        window=1,
+        min_periods=1,
+    ).mean()
+    return (
+        plot_timestamps,
+        low_frequency,
+        high_frequency,
     )
 
 
@@ -285,6 +346,7 @@ def plot_sleep_data(
     recording. The FDC1004 file contains elapsed timestamps only.
     ``plots`` selects panels by name. Supported names are
     ``sleep_stages``, ``heart_rate``, ``heart_rate_rmsdd``, ``capacitance``,
+    ``heart_rate_stft``,
     ``capacitance_difference_mean``, ``rmsdd``, ``movement``, and
     ``movement_count``. By default, all panels are shown.
 
@@ -372,6 +434,9 @@ def plot_sleep_data(
         polar["HR (bpm)"],
         heart_rate_rmsdd_window_size,
     )
+    heart_rate_band_times, low_frequency, high_frequency = _heart_rate_frequency_bands(
+        polar
+    )
     correlation = _movement_rem_correlation(fdc)
     print("Sleep-phase movement statistics:")
     statistics = _sleep_stage_statistics(fdc)
@@ -390,6 +455,7 @@ def plot_sleep_data(
         "sleep_stages": 1.4,
         "heart_rate": 1.2,
         "heart_rate_rmsdd": 1.2,
+        "heart_rate_stft": 1.2,
         "capacitance": 2.0,
         # "capacitance_difference_mean": 1.5,
         "rmsdd": 1.5,
@@ -463,6 +529,25 @@ def plot_sleep_data(
             axis.set_title(
                 f"Heart-rate RMSDD (window size: {heart_rate_rmsdd_window_size})"
             )
+            axis.legend(loc="upper right")
+            axis.grid(True, alpha=0.3)
+        elif plot_name == "heart_rate_stft":
+            axis.plot(
+                heart_rate_band_times,
+                low_frequency,
+                color="tab:blue",
+                linewidth=1.0,
+                label="LF amplitude (0.04-0.15 Hz)",
+            )
+            axis.plot(
+                heart_rate_band_times,
+                high_frequency,
+                color="tab:orange",
+                linewidth=1.0,
+                label="HF amplitude (0.15-0.4 Hz)",
+            )
+            axis.set_ylabel("Integrated amplitude")
+            axis.set_title("HRV calculated with STFT")
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
         elif plot_name == "capacitance":
