@@ -27,10 +27,10 @@ PLOT_NAMES = (
     "heart_rate",
     "heart_rate_rmsdd",
     "capacitance",
-    "capacitance_difference_mean",
+    # "capacitance_difference_mean",
     "rmsdd",
     "movement",
-    "movement_count",
+    # "movement_count",
 )
 MOVEMENT_STATES = ("still", "movement", "strong movement")
 STRONG_MOVEMENT_THRESHOLD = 0.7
@@ -128,11 +128,11 @@ def _rolling_rmsdd(series: pd.Series, window: int) -> pd.Series:
     )
 
 
-def _rolling_difference_mean(series: pd.Series, window: int) -> pd.Series:
-    """Calculate the rolling mean of absolute successive differences."""
-    differences = series.interpolate(limit_direction="both").diff().abs()
-    differences = differences.mask(differences.abs() > 4, 0)
-    return differences.rolling(window=window, min_periods=window).mean()
+# def _rolling_difference_mean(series: pd.Series, window: int) -> pd.Series:
+#     """Calculate the rolling mean of absolute successive differences."""
+#     differences = series.interpolate(limit_direction="both").diff().abs()
+#     differences = differences.mask(differences.abs() > 4, 0)
+#     return differences.rolling(window=window, min_periods=window).mean()
 
 
 def _predict_movement(
@@ -271,7 +271,7 @@ def plot_sleep_data(
     rmsdd_window_size: int | None = 20,
     heart_rate_rmsdd_window_size: int | None = None,
     capacitance_rmsdd_window_size: int | None = None,
-    capacitance_difference_mean_window_size: int | None = None,
+    # capacitance_difference_mean_window_size: int | None = None,
     rmsdd_ylim: tuple[float, float] | None = None,
     plot_ylims: Mapping[str, tuple[float, float]] | None = None,
     cin2_threshold: float = 0.065,
@@ -295,21 +295,21 @@ def plot_sleep_data(
         heart_rate_rmsdd_window_size = rmsdd_window_size
     if capacitance_rmsdd_window_size is None:
         capacitance_rmsdd_window_size = rmsdd_window_size
-    if capacitance_difference_mean_window_size is None:
-        capacitance_difference_mean_window_size = capacitance_rmsdd_window_size
+    # if capacitance_difference_mean_window_size is None:
+    #     capacitance_difference_mean_window_size = capacitance_rmsdd_window_size
     if heart_rate_rmsdd_window_size is None or capacitance_rmsdd_window_size is None:
         raise ValueError("At least one RMSDD window size must be provided.")
     if not isinstance(heart_rate_rmsdd_window_size, int) or heart_rate_rmsdd_window_size < 1:
         raise ValueError("heart_rate_rmsdd_window_size must be a positive integer.")
     if not isinstance(capacitance_rmsdd_window_size, int) or capacitance_rmsdd_window_size < 1:
         raise ValueError("capacitance_rmsdd_window_size must be a positive integer.")
-    if (
-        not isinstance(capacitance_difference_mean_window_size, int)
-        or capacitance_difference_mean_window_size < 1
-    ):
-        raise ValueError(
-            "capacitance_difference_mean_window_size must be a positive integer."
-        )
+    # if (
+    #     not isinstance(capacitance_difference_mean_window_size, int)
+    #     or capacitance_difference_mean_window_size < 1
+    # ):
+    #     raise ValueError(
+    #         "capacitance_difference_mean_window_size must be a positive integer."
+    #     )
     plot_ylims = dict(plot_ylims or {})
     if rmsdd_ylim is not None:
         plot_ylims.setdefault("rmsdd", rmsdd_ylim)
@@ -391,10 +391,10 @@ def plot_sleep_data(
         "heart_rate": 1.2,
         "heart_rate_rmsdd": 1.2,
         "capacitance": 2.0,
-        "capacitance_difference_mean": 1.5,
+        # "capacitance_difference_mean": 1.5,
         "rmsdd": 1.5,
         "movement": 1.0,
-        "movement_count": 1.0,
+        # "movement_count": 1.0,
     }
     figure, axes = plt.subplots(
         len(selected_plots),
@@ -472,34 +472,34 @@ def plot_sleep_data(
             axis.set_title("FDC1004 capacitance")
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
-        elif plot_name == "capacitance_difference_mean":
-            cin2_difference_mean = _rolling_difference_mean(
-                fdc["CIN2_pF"],
-                capacitance_difference_mean_window_size,
-            )
-            cin4_difference_mean = _rolling_difference_mean(
-                fdc["CIN4_pF"],
-                capacitance_difference_mean_window_size,
-            )
-            axis.plot(
-                fdc["timestamp"],
-                cin2_difference_mean,
-                label="CIN2 difference mean",
-                linewidth=0.8,
-            )
-            axis.plot(
-                fdc["timestamp"],
-                cin4_difference_mean,
-                label="CIN4 difference mean",
-                linewidth=0.8,
-            )
-            axis.set_ylabel("Mean difference (pF)")
-            axis.set_title(
-                "Capacitance difference rolling mean "
-                f"(window size: {capacitance_difference_mean_window_size})"
-            )
-            axis.legend(loc="upper right")
-            axis.grid(True, alpha=0.3)
+        # elif plot_name == "capacitance_difference_mean":
+        #     cin2_difference_mean = _rolling_difference_mean(
+        #         fdc["CIN2_pF"],
+        #         capacitance_difference_mean_window_size,
+        #     )
+        #     cin4_difference_mean = _rolling_difference_mean(
+        #         fdc["CIN4_pF"],
+        #         capacitance_difference_mean_window_size,
+        #     )
+        #     axis.plot(
+        #         fdc["timestamp"],
+        #         cin2_difference_mean,
+        #         label="CIN2 difference mean",
+        #         linewidth=0.8,
+        #     )
+        #     axis.plot(
+        #         fdc["timestamp"],
+        #         cin4_difference_mean,
+        #         label="CIN4 difference mean",
+        #         linewidth=0.8,
+        #     )
+        #     axis.set_ylabel("Mean difference (pF)")
+        #     axis.set_title(
+        #         "Capacitance difference rolling mean "
+        #         f"(window size: {capacitance_difference_mean_window_size})"
+        #     )
+        #     axis.legend(loc="upper right")
+        #     axis.grid(True, alpha=0.3)
         elif plot_name == "rmsdd":
             axis.plot(fdc["timestamp"], fdc["CIN2_rmsdd"], label="CIN2 RMSDD", linewidth=0.8)
             axis.plot(fdc["timestamp"], fdc["CIN4_rmsdd"], label="CIN4 RMSDD", linewidth=0.8)
@@ -542,21 +542,21 @@ def plot_sleep_data(
             )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
-        elif plot_name == "movement_count":
-            movement_count = fdc["movement_prediction"].isin(
-                ["movement", "strong movement"]
-            ).rolling(window=20, min_periods=1).sum()
-            axis.plot(
-                fdc["timestamp"],
-                movement_count,
-                color="tab:green",
-                linewidth=1.2,
-                label="Movement count (last 20)",
-            )
-            axis.set_ylabel("Movement count")
-            axis.set_title("Movement count over last 20 measurements")
-            axis.legend(loc="upper right")
-            axis.grid(True, alpha=0.3)
+        # elif plot_name == "movement_count":
+        #     movement_count = fdc["movement_prediction"].isin(
+        #         ["movement", "strong movement"]
+        #     ).rolling(window=20, min_periods=1).sum()
+        #     axis.plot(
+        #         fdc["timestamp"],
+        #         movement_count,
+        #         color="tab:green",
+        #         linewidth=1.2,
+        #         label="Movement count (last 20)",
+        #     )
+        #     axis.set_ylabel("Movement count")
+        #     axis.set_title("Movement count over last 20 measurements")
+        #     axis.legend(loc="upper right")
+        #     axis.grid(True, alpha=0.3)
 
         if plot_name in plot_ylims:
             axis.set_ylim(*plot_ylims[plot_name])
