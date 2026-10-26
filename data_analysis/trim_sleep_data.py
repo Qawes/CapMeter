@@ -14,6 +14,21 @@ DEFAULT_DATA_DIRECTORY = Path(__file__).parent / "sleep_tests"
 DEFAULT_OUTPUT_DIRECTORY = DEFAULT_DATA_DIRECTORY / "datasets_for_training"
 
 
+def parse_trim_jobs(
+    jobs: list[dict[str, object]],
+) -> list[tuple[date, float, float]]:
+    """Validate notebook-style trim jobs and convert them to typed values."""
+    parsed_jobs = []
+    for job in jobs:
+        recording_date = date.fromisoformat(str(job["date"]))
+        front_trim = float(job["front_trim"])
+        back_trim = float(job["back_trim"])
+        if front_trim < 0 or back_trim < 0:
+            raise ValueError(f"Trim values must be non-negative: {job}")
+        parsed_jobs.append((recording_date, front_trim, back_trim))
+    return parsed_jobs
+
+
 def _parse_date(value: str) -> date:
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
@@ -79,6 +94,32 @@ def _trim_apple(
     data = data.loc[keep].copy()
     data["Start time"] = data["Start time"].clip(lower=start, upper=end)
     data["End time"] = data["End time"].clip(lower=start, upper=end)
+    if data.empty:
+        data = pd.DataFrame(
+            [{"Sleep stage": "Awake", "Start time": start, "End time": end}],
+            columns=data.columns,
+        )
+    else:
+        data = data.sort_values("Start time").reset_index(drop=True)
+        fill_rows = []
+        if data.iloc[0]["Start time"] > start:
+            fill_rows.append(
+                {
+                    "Sleep stage": "Awake",
+                    "Start time": start,
+                    "End time": data.iloc[0]["Start time"],
+                }
+            )
+        if data.iloc[-1]["End time"] < end:
+            fill_rows.append(
+                {
+                    "Sleep stage": "Awake",
+                    "Start time": data.iloc[-1]["End time"],
+                    "End time": end,
+                }
+            )
+        if fill_rows:
+            data = pd.concat([pd.DataFrame(fill_rows), data], ignore_index=True)
     data.to_csv(destination, index=False)
 
 
