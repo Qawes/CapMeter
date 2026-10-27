@@ -333,7 +333,7 @@ def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
             "movement": "movement count",
             "strong movement": "strong movement count",
             "phase_vs_sleep_%": "phase/whole sleep in [%]",
-            "movement_%": "movement/all points [%]",
+            "movement_%": "movement/all points in phase [%]",
             "strong_movement_%": "strong movement/all points [%]",
             "mean_CIN2_rmsdd": "mean C_2 RMSDD [pF]",
             "mean_CIN4_rmsdd": "mean C_4 RMSDD [pF]",
@@ -352,6 +352,7 @@ def plot_sleep_data(
     rmsdd_window_size: int | None = 20,
     heart_rate_rmsdd_window_size: int | None = None,
     capacitance_rmsdd_window_size: int | None = None,
+    lf_hrv_moving_average_window_size: int | None = None,
     # capacitance_difference_mean_window_size: int | None = None,
     rmsdd_ylim: tuple[float, float] | None = None,
     plot_ylims: Mapping[str, tuple[float, float]] | None = None,
@@ -372,6 +373,8 @@ def plot_sleep_data(
 
     ``rmsdd_window_size`` is retained as a compatibility default for both
     RMSDD calculations. The dedicated window-size arguments override it.
+    ``lf_hrv_moving_average_window_size`` enables trailing moving-average
+    smoothing of the LF HRV plot when set to a positive integer.
     """
     if heart_rate_rmsdd_window_size is None:
         heart_rate_rmsdd_window_size = rmsdd_window_size
@@ -385,6 +388,16 @@ def plot_sleep_data(
         raise ValueError("heart_rate_rmsdd_window_size must be a positive integer.")
     if not isinstance(capacitance_rmsdd_window_size, int) or capacitance_rmsdd_window_size < 1:
         raise ValueError("capacitance_rmsdd_window_size must be a positive integer.")
+    if (
+        lf_hrv_moving_average_window_size is not None
+        and (
+            not isinstance(lf_hrv_moving_average_window_size, int)
+            or lf_hrv_moving_average_window_size < 1
+        )
+    ):
+        raise ValueError(
+            "lf_hrv_moving_average_window_size must be a positive integer or None."
+        )
     # if (
     #     not isinstance(capacitance_difference_mean_window_size, int)
     #     or capacitance_difference_mean_window_size < 1
@@ -437,12 +450,23 @@ def plot_sleep_data(
         )
 
     apple = _load_apple_watch(apple_path)
-    polar = _load_polar(polar_paths[0])
-    raw_fdc = _load_fdc1004(fdc_path, fdc_start_time)
-    heart_rate_rmsdd = _rolling_rmsdd(
-        polar["HR (bpm)"],
-        heart_rate_rmsdd_window_size,
+    polar_parts = []
+    heart_rate_band_parts = []
+    for polar_path in polar_paths:
+        polar_part = _load_polar(polar_path)
+        polar_part["heart_rate_rmsdd"] = _rolling_rmsdd(
+            polar_part["HR (bpm)"],
+            heart_rate_rmsdd_window_size,
+        )
+        polar_parts.append(polar_part)
+        heart_rate_band_parts.append(_heart_rate_frequency_bands(polar_part))
+    polar = (
+        pd.concat(polar_parts, ignore_index=True)
+        .sort_values("timestamp")
+        .reset_index(drop=True)
     )
+    raw_fdc = _load_fdc1004(fdc_path, fdc_start_time)
+    heart_rate_rmsdd = polar["heart_rate_rmsdd"]
     heart_rate_rmsdd_valid = polar["timestamp"].notna() & heart_rate_rmsdd.notna()
     heart_rate_rmsdd_by_timestamp = pd.Series(
         np.nan,
@@ -481,9 +505,23 @@ def plot_sleep_data(
         fdc["timestamp"].max(),
     )
     fdc = _mark_sleep_stages(fdc, apple)
-    heart_rate_band_times, low_frequency, high_frequency = _heart_rate_frequency_bands(
-        polar
+    heart_rate_band_times = pd.concat(
+        [part[0] for part in heart_rate_band_parts],
+        ignore_index=True,
     )
+    low_frequency = pd.concat(
+        [part[1] for part in heart_rate_band_parts],
+        ignore_index=True,
+    )
+    high_frequency = pd.concat(
+        [part[2] for part in heart_rate_band_parts],
+        ignore_index=True,
+    )
+    if lf_hrv_moving_average_window_size is not None:
+        low_frequency = low_frequency.rolling(
+            window=lf_hrv_moving_average_window_size,
+            min_periods=1,
+        ).mean()
     correlation = _movement_rem_correlation(fdc)
     print("Sleep-phase movement statistics:")
     statistics = _sleep_stage_statistics(fdc)
