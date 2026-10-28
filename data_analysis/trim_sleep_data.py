@@ -16,8 +16,12 @@ DEFAULT_OUTPUT_DIRECTORY = DEFAULT_DATA_DIRECTORY / "datasets_for_training"
 
 def parse_trim_jobs(
     jobs: list[dict[str, object]],
-) -> list[tuple[date, float, float]]:
-    """Validate notebook-style trim jobs and convert them to typed values."""
+) -> list[tuple[date, float, float, float]]:
+    """Validate notebook-style trim jobs and convert them to typed values.
+
+    ``polar_offset`` is optional (seconds, default 0); positive values shift the
+    Polar data later in time, as ``polar_time_offset_seconds`` does in sleep_analyzer.py.
+    """
     parsed_jobs = []
     for job in jobs:
         recording_date = date.fromisoformat(str(job["date"]))
@@ -25,7 +29,8 @@ def parse_trim_jobs(
         back_trim = float(job["back_trim"])
         if front_trim < 0 or back_trim < 0:
             raise ValueError(f"Trim values must be non-negative: {job}")
-        parsed_jobs.append((recording_date, front_trim, back_trim))
+        polar_offset = float(job.get("polar_offset", 0.0))
+        parsed_jobs.append((recording_date, front_trim, back_trim, polar_offset))
     return parsed_jobs
 
 
@@ -136,7 +141,13 @@ def _trim_polar(
     destination: Path,
     start: datetime,
     end: datetime,
+    offset_seconds: float = 0.0,
 ) -> None:
+    """Keep Polar samples whose time, shifted by ``offset_seconds``, is in [start, end).
+
+    The ``Time`` values are written unchanged, so the first kept sample ends up at
+    time zero of the trimmed file once the notebooks re-base it.
+    """
     lines = source.read_text(encoding="utf-8-sig").splitlines(keepends=True)
     if len(lines) < 4:
         raise ValueError(f"Polar file is missing metadata or sample rows: {source}")
@@ -150,7 +161,7 @@ def _trim_polar(
     for row in sample_rows:
         try:
             sample_time = polar_start + timedelta(
-                seconds=pd.to_timedelta(row["Time"]).total_seconds()
+                seconds=pd.to_timedelta(row["Time"]).total_seconds() + offset_seconds
             )
         except (KeyError, ValueError):
             continue
@@ -182,8 +193,13 @@ def trim_sleep_data(
     *,
     data_directory: Path = DEFAULT_DATA_DIRECTORY,
     output_directory: Path = DEFAULT_OUTPUT_DIRECTORY,
+    polar_offset: float = 0.0,
 ) -> None:
-    """Trim all date-matched datasets using the FDC recording as the baseline."""
+    """Trim all date-matched datasets using the FDC recording as the baseline.
+
+    ``polar_offset`` (seconds) shifts the Polar timestamps before trimming;
+    positive values shift them later.
+    """
     if front_trim < 0 or back_trim < 0:
         raise ValueError("front_trim and back_trim must be non-negative.")
 
@@ -229,9 +245,10 @@ def trim_sleep_data(
             output_directory / polar_source.name,
             start,
             end,
+            polar_offset,
         )
 
-    print(f"Trimmed interval: {start} to {end}")
+    print(f"Trimmed interval: {start} to {end} (Polar offset: {polar_offset:g}s)")
     print(f"Outputs written to: {output_directory}")
 
 
@@ -248,6 +265,12 @@ def main() -> None:
         type=float,
         help="Seconds to remove from the end of the FDC recording.",
     )
+    parser.add_argument(
+        "--polar-offset",
+        type=float,
+        default=0.0,
+        help="Seconds to shift the Polar data (positive = later) before trimming.",
+    )
     parser.add_argument("--data-directory", type=Path, default=DEFAULT_DATA_DIRECTORY)
     parser.add_argument(
         "--output-directory",
@@ -261,6 +284,7 @@ def main() -> None:
         arguments.back_trim,
         data_directory=arguments.data_directory,
         output_directory=arguments.output_directory,
+        polar_offset=arguments.polar_offset,
     )
 
 
