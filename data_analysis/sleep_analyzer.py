@@ -642,6 +642,7 @@ def plot_sleep_data(
     epoch_step_seconds: float = 30.0,
     epoch_calculation_window_seconds: float | None = None,
     heart_rate_calculation_window_seconds: float | None = None,
+    capacitance_calculation_window_seconds: float | None = None,
     epoch_window_seconds: float | None = None,
     epoch_window_alignment: str = "trailing",
     lf_hrv_moving_average_window_size: int | None = None,
@@ -681,6 +682,8 @@ def plot_sleep_data(
     ``heart_rate_calculation_window_seconds`` overrides the calculation window
     for the heart-rate RMSDD only (defaults to
     ``epoch_calculation_window_seconds``); the step is unchanged.
+    ``capacitance_calculation_window_seconds`` does the same for the
+    capacitance RMSDD only.
     ``epoch_window_alignment`` selects how the calculation window aligns with
     the epoch step ('trailing', 'centered', or 'forward', defaults to 'trailing').
     ``sleep_classification`` classifies each epoch from the 30s HR RMSDD (HRV)
@@ -856,6 +859,11 @@ def plot_sleep_data(
     elif heart_rate_calculation_window_seconds <= 0:
         raise ValueError("heart_rate_calculation_window_seconds must be positive.")
     heart_rate_calculation_window_seconds = float(heart_rate_calculation_window_seconds)
+    if capacitance_calculation_window_seconds is None:
+        capacitance_calculation_window_seconds = epoch_calculation_window_seconds
+    elif capacitance_calculation_window_seconds <= 0:
+        raise ValueError("capacitance_calculation_window_seconds must be positive.")
+    capacitance_calculation_window_seconds = float(capacitance_calculation_window_seconds)
 
     valid_alignments = ("trailing", "centered", "forward")
     if epoch_window_alignment not in valid_alignments:
@@ -896,7 +904,7 @@ def plot_sleep_data(
             (pd.to_datetime(epoch_starts) + calc_delta).values,
         )
 
-    calc_starts, calc_ends = _calc_bounds(epoch_calculation_window_seconds)
+    calc_starts, calc_ends = _calc_bounds(capacitance_calculation_window_seconds)
     hr_calc_starts, hr_calc_ends = _calc_bounds(heart_rate_calculation_window_seconds)
 
     hr_epoch_rmsdd = _epoch_rmsdd(
@@ -1197,7 +1205,8 @@ def plot_sleep_data(
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
         elif plot_name == "rmsdd_30s":
-            calc_w_str = f"{int(epoch_calculation_window_seconds) if epoch_calculation_window_seconds.is_integer() else epoch_calculation_window_seconds}s"
+            cap_w = capacitance_calculation_window_seconds
+            calc_w_str = f"{int(cap_w) if cap_w.is_integer() else cap_w}s"
             step_str = f"{int(epoch_step_seconds) if epoch_step_seconds.is_integer() else epoch_step_seconds}s"
             axis.step(
                 epoch_plot_times,
@@ -1216,7 +1225,7 @@ def plot_sleep_data(
             axis.axhline(cin2_threshold, color="tab:blue", linestyle="--", alpha=0.6)
             axis.axhline(cin4_threshold, color="tab:orange", linestyle="--", alpha=0.6)
             axis.set_ylabel("RMSDD (pF)")
-            if epoch_calculation_window_seconds == epoch_step_seconds:
+            if cap_w == epoch_step_seconds:
                 axis.set_title(f"RMSDD (constant {calc_w_str} window)")
             else:
                 axis.set_title(f"RMSDD ({calc_w_str} window, {step_str} step)")
