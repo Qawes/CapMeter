@@ -27,13 +27,25 @@ PLOT_NAMES = (
     "sleep_stages",
     "heart_rate",
     "heart_rate_rmsdd",
+    "heart_rate_rmsdd_30s",
     "heart_rate_stft",
     "capacitance",
     # "capacitance_difference_mean",
     "rmsdd",
+    "rmsdd_30s",
     "movement",
     # "movement_count",
+    "sleep_classification",
 )
+PLOT_ALIASES = {
+    "heart_rate_epoch_rmsdd": "heart_rate_rmsdd_30s",
+    "epoch_heart_rate_rmsdd": "heart_rate_rmsdd_30s",
+    "epoch_rmsdd": "rmsdd_30s",
+    "capacitance_rmsdd_30s": "rmsdd_30s",
+    "capacitance_epoch_rmsdd": "rmsdd_30s",
+    "fdc_rmsdd_30s": "rmsdd_30s",
+    "fdc_epoch_rmsdd": "rmsdd_30s",
+}
 MOVEMENT_STATES = ("still", "movement", "strong movement")
 STRONG_MOVEMENT_THRESHOLD = 0.7
 HEART_RATE_RMSDD_MOVEMENT_THRESHOLD = 0.7
@@ -131,6 +143,127 @@ def _rolling_rmsdd(series: pd.Series, window: int) -> pd.Series:
     )
 
 
+def _build_30s_epochs(
+    apple: pd.DataFrame,
+    start_bound: pd.Timestamp | None = None,
+    end_bound: pd.Timestamp | None = None,
+    epoch_duration_seconds: float = 30.0,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Build constant epoch intervals aligned to Apple Watch start times."""
+    apple_sorted = apple.sort_values("Start time").reset_index(drop=True)
+    delta = pd.Timedelta(seconds=epoch_duration_seconds)
+    if apple_sorted.empty:
+        if start_bound is not None and end_bound is not None and start_bound < end_bound:
+            cur = start_bound
+            epochs = []
+            while cur < end_bound:
+                nxt = min(end_bound, cur + delta)
+                epochs.append((cur, nxt))
+                cur = nxt
+            return epochs
+        return []
+
+    apple_start = apple_sorted["Start time"].iloc[0]
+    apple_end = apple_sorted["End time"].iloc[-1]
+
+    leading: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    if start_bound is not None and start_bound < apple_start:
+        cur_end = apple_start
+        while cur_end > start_bound:
+            cur_start = max(start_bound, cur_end - delta)
+            leading.append((cur_start, cur_end))
+            cur_end = cur_start
+        leading.reverse()
+
+    main: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for i, r in enumerate(apple_sorted.itertuples()):
+        s = r._2
+        e = r._3
+        if i > 0:
+            prev_e = apple_sorted.iloc[i - 1]["End time"]
+            if s > prev_e:
+                gap_cur = prev_e
+                while gap_cur < s:
+                    gap_next = min(s, gap_cur + delta)
+                    main.append((gap_cur, gap_next))
+                    gap_cur = gap_next
+        dur = (e - s).total_seconds()
+        n = max(1, int(round(dur / epoch_duration_seconds)))
+        for j in range(n):
+            t_s = s + pd.Timedelta(seconds=j * epoch_duration_seconds)
+            t_e = (
+                s + pd.Timedelta(seconds=(j + 1) * epoch_duration_seconds)
+                if j < n - 1
+                else e
+            )
+            main.append((t_s, t_e))
+
+    trailing: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    if end_bound is not None and end_bound > apple_end:
+        cur_start = apple_end
+        while cur_start < end_bound:
+            cur_end = min(end_bound, cur_start + delta)
+            trailing.append((cur_start, cur_end))
+            cur_start = cur_end
+
+    return leading + main + trailing
+
+
+def _epoch_rmsdd(
+    series: pd.Series,
+    timestamps: pd.Series,
+    epoch_starts: np.ndarray,
+    epoch_ends: np.ndarray,
+    *,
+    max_difference: float | None = 4.0,
+    min_samples: int = 2,
+) -> np.ndarray:
+    """Calculate RMSDD within constant epoch windows."""
+    valid_mask = timestamps.notna() & series.notna()
+    if not valid_mask.any() or len(epoch_starts) == 0:
+        return np.full(len(epoch_starts), np.nan, dtype=float)
+
+    v_timestamps = pd.to_datetime(timestamps[valid_mask]).values
+    v_series = series[valid_mask].interpolate(limit_direction="both")
+    diffs = v_series.diff()
+    if max_difference is not None:
+        diffs = diffs.mask(diffs.abs() > max_difference, 0.0)
+    sq_diffs = diffs.pow(2).to_numpy()
+
+    s_idx = np.searchsorted(v_timestamps, epoch_starts, side="left")
+    e_idx = np.searchsorted(v_timestamps, epoch_ends, side="left")
+
+    result = np.full(len(epoch_starts), np.nan, dtype=float)
+    for i in range(len(epoch_starts)):
+        si, ei = s_idx[i], e_idx[i]
+        if ei - si >= min_samples:
+            result[i] = np.sqrt(np.mean(sq_diffs[si:ei]))
+    return result
+
+
+def _map_epochs_to_timestamps(
+    timestamps: pd.Series,
+    epoch_starts: np.ndarray,
+    epoch_ends: np.ndarray,
+    epoch_values: np.ndarray,
+) -> pd.Series:
+    """Map piecewise-constant epoch values onto a sample timestamp series."""
+    if len(epoch_starts) == 0 or len(timestamps) == 0:
+        return pd.Series(np.nan, index=timestamps.index, dtype=float)
+
+    t_vals = pd.to_datetime(timestamps).values
+    idx = np.searchsorted(epoch_ends, t_vals, side="right")
+    valid_idx = np.clip(idx, 0, len(epoch_starts) - 1)
+    in_bounds = (
+        (idx >= 0)
+        & (idx < len(epoch_starts))
+        & (t_vals >= epoch_starts[valid_idx])
+        & (t_vals < epoch_ends[valid_idx])
+    )
+    mapped = np.where(in_bounds, epoch_values[valid_idx], np.nan)
+    return pd.Series(mapped, index=timestamps.index, dtype=float)
+
+
 def _heart_rate_frequency_bands(
     polar: pd.DataFrame,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -195,6 +328,110 @@ def _heart_rate_frequency_bands(
 #     differences = series.interpolate(limit_direction="both").diff().abs()
 #     differences = differences.mask(differences.abs() > 4, 0)
 #     return differences.rolling(window=window, min_periods=window).mean()
+
+
+def classify_sleep_stages(
+    hrv_rmsdd: np.ndarray,
+    capacitance_rmsdd: np.ndarray,
+    *,
+    hrv_threshold_1: float,
+    hrv_threshold_2: float,
+    c_rmsdd_threshold_1: float,
+    c_rmsdd_threshold_2: float,
+) -> np.ndarray:
+    """Classify epochs into stage numbers (see ``SLEEP_STAGE_NAMES``); NaN if no data.
+
+    - HRV > hrv_threshold_1 and C > c_rmsdd_threshold_1 -> Awake
+    - HRV > hrv_threshold_1 and c_rmsdd_threshold_2 < C <= c_rmsdd_threshold_1 -> REM
+    - HRV > hrv_threshold_2 (remaining) -> Core
+    - HRV <= hrv_threshold_2 -> Deep
+    """
+    hrv = np.asarray(hrv_rmsdd, dtype=float)
+    cap = np.asarray(capacitance_rmsdd, dtype=float)
+    stages = np.full(hrv.shape, SLEEP_STAGE_NAMES["Deep"], dtype=float)
+    stages[hrv > hrv_threshold_2] = SLEEP_STAGE_NAMES["Core"]
+    high_hrv = hrv > hrv_threshold_1
+    stages[high_hrv & (cap > c_rmsdd_threshold_2)] = SLEEP_STAGE_NAMES["REM"]
+    stages[high_hrv & (cap > c_rmsdd_threshold_1)] = SLEEP_STAGE_NAMES["Awake"]
+    stages[np.isnan(hrv) | np.isnan(cap)] = np.nan
+    return stages
+
+
+def _print_classification_comparison(
+    predicted: np.ndarray,
+    epoch_starts: np.ndarray,
+    epoch_ends: np.ndarray,
+    apple: pd.DataFrame,
+) -> None:
+    """Print a confusion matrix and metrics of predicted stages vs Apple Watch."""
+    if len(predicted) == 0:
+        print("No epochs to compare.")
+        return
+    mids = (
+        pd.to_datetime(epoch_starts)
+        + (pd.to_datetime(epoch_ends) - pd.to_datetime(epoch_starts)) / 2
+    ).to_numpy()
+    apple_sorted = apple.sort_values("Start time").reset_index(drop=True)
+    starts = apple_sorted["Start time"].to_numpy()
+    ends = apple_sorted["End time"].to_numpy()
+    position = np.searchsorted(starts, mids, side="right") - 1
+    valid_position = position >= 0
+    clipped = np.clip(position, 0, len(apple_sorted) - 1)
+    inside = valid_position & (mids < ends[clipped])
+    reference = np.full(len(mids), np.nan)
+    reference[inside] = (
+        apple_sorted["Sleep stage"].map(SLEEP_STAGE_NAMES).to_numpy(dtype=float)[clipped][inside]
+    )
+
+    mask = ~np.isnan(predicted) & ~np.isnan(reference)
+    if not mask.any():
+        print("No overlapping classified epochs to compare.")
+        return
+    labels = SLEEP_STAGE_LABELS
+    y_true = reference[mask].astype(int)
+    y_pred = predicted[mask].astype(int)
+    n = len(labels)
+    matrix = np.zeros((n, n), dtype=int)
+    np.add.at(matrix, (y_true, y_pred), 1)
+    total = matrix.sum()
+
+    confusion = pd.DataFrame(
+        matrix,
+        index=pd.Index([f"Apple {l}" for l in labels]),
+        columns=pd.Index([f"Pred {l}" for l in labels]),
+    )
+    true_count = matrix.sum(axis=1)
+    pred_count = matrix.sum(axis=0)
+    true_positive = np.diag(matrix)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        precision = true_positive / pred_count
+        recall = true_positive / true_count
+        f1 = 2 * precision * recall / (precision + recall)
+    per_class = pd.DataFrame(
+        {"precision": precision, "recall": recall, "F1": f1, "support": true_count},
+        index=labels,
+    )
+    accuracy = true_positive.sum() / total
+    expected = (true_count * pred_count).sum() / total**2
+    kappa = (accuracy - expected) / (1 - expected) if expected < 1 else np.nan
+    wake_true = y_true == SLEEP_STAGE_NAMES["Awake"]
+    wake_pred = y_pred == SLEEP_STAGE_NAMES["Awake"]
+    sleep_wake_accuracy = (wake_true == wake_pred).mean()
+    sensitivity = (~wake_pred[~wake_true]).mean() if (~wake_true).any() else np.nan
+    specificity = wake_pred[wake_true].mean() if wake_true.any() else np.nan
+
+    print(f"\nClassification vs Apple Watch ({total} epochs):")
+    print(confusion.to_string())
+    print()
+    print(per_class.to_string(float_format=lambda v: f"{v:.3f}"))
+    print(
+        f"\nAccuracy: {accuracy:.3f} | Cohen's kappa: {kappa:.3f} | "
+        f"Macro F1: {np.nanmean(f1):.3f}"
+    )
+    print(
+        f"Sleep/wake accuracy: {sleep_wake_accuracy:.3f} | "
+        f"Sleep sensitivity: {sensitivity:.3f} | Wake specificity: {specificity:.3f}"
+    )
 
 
 def _predict_movement(
@@ -278,7 +515,11 @@ def _movement_rem_correlation(fdc: pd.DataFrame) -> float:
     return float(values["movement_prediction"].corr(values["rem_phase"]))
 
 
-def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
+def _sleep_stage_statistics(
+    fdc: pd.DataFrame,
+    polar: pd.DataFrame | None = None,
+    stft_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     values = fdc[
         [
             "timestamp",
@@ -327,7 +568,8 @@ def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
         if total_strong_movement
         else np.nan
     )
-    return table.rename(
+
+    table = table.rename(
         columns={
             "still": "still count",
             "movement": "movement count",
@@ -343,6 +585,51 @@ def _sleep_stage_statistics(fdc: pd.DataFrame) -> pd.DataFrame:
         }
     )
 
+    # Add means for all signals/plots by sleep phase
+    if polar is not None and "sleep_stage" in polar.columns:
+        if "HR (bpm)" in polar.columns:
+            table["mean HR [bpm]"] = (
+                polar.groupby("sleep_stage")["HR (bpm)"].mean().reindex(table.index)
+            )
+        if "heart_rate_rmsdd" in polar.columns:
+            table["mean HR RMSDD [bpm]"] = (
+                polar.groupby("sleep_stage")["heart_rate_rmsdd"].mean().reindex(table.index)
+            )
+        if "heart_rate_rmsdd_30s" in polar.columns:
+            table["mean HR 30s RMSDD [bpm]"] = (
+                polar.groupby("sleep_stage")["heart_rate_rmsdd_30s"].mean().reindex(table.index)
+            )
+
+    if stft_df is not None and "sleep_stage" in stft_df.columns:
+        if "low_frequency" in stft_df.columns:
+            table["mean LF HRV"] = (
+                stft_df.groupby("sleep_stage")["low_frequency"].mean().reindex(table.index)
+            )
+        if "high_frequency" in stft_df.columns:
+            table["mean HF HRV"] = (
+                stft_df.groupby("sleep_stage")["high_frequency"].mean().reindex(table.index)
+            )
+
+    if "sleep_stage" in fdc.columns:
+        if "CIN2_pF" in fdc.columns:
+            table["mean CIN2 [pF]"] = (
+                fdc.groupby("sleep_stage")["CIN2_pF"].mean().reindex(table.index)
+            )
+        if "CIN4_pF" in fdc.columns:
+            table["mean CIN4 [pF]"] = (
+                fdc.groupby("sleep_stage")["CIN4_pF"].mean().reindex(table.index)
+            )
+        if "CIN2_rmsdd_30s" in fdc.columns:
+            table["mean C_2 30s RMSDD [pF]"] = (
+                fdc.groupby("sleep_stage")["CIN2_rmsdd_30s"].mean().reindex(table.index)
+            )
+        if "CIN4_rmsdd_30s" in fdc.columns:
+            table["mean C_4 30s RMSDD [pF]"] = (
+                fdc.groupby("sleep_stage")["CIN4_rmsdd_30s"].mean().reindex(table.index)
+            )
+
+    return table
+
 
 def plot_sleep_data(
     analysis_date: DateLike,
@@ -352,12 +639,22 @@ def plot_sleep_data(
     rmsdd_window_size: int | None = 20,
     heart_rate_rmsdd_window_size: int | None = None,
     capacitance_rmsdd_window_size: int | None = None,
+    epoch_step_seconds: float = 30.0,
+    epoch_calculation_window_seconds: float | None = None,
+    heart_rate_calculation_window_seconds: float | None = None,
+    epoch_window_seconds: float | None = None,
+    epoch_window_alignment: str = "trailing",
     lf_hrv_moving_average_window_size: int | None = None,
+    polar_time_offset_seconds: float = 0.0,
     # capacitance_difference_mean_window_size: int | None = None,
     rmsdd_ylim: tuple[float, float] | None = None,
     plot_ylims: Mapping[str, tuple[float, float]] | None = None,
     cin2_threshold: float = 0.065,
     cin4_threshold: float = 0.09,
+    hrv_threshold_1: float = 1.0,
+    hrv_threshold_2: float = 0.5,
+    c_rmsdd_threshold_1: float = 0.09,
+    c_rmsdd_threshold_2: float = 0.03,
     plots: Sequence[str] | None = None,
     show: bool = True,
 ) -> tuple[plt.Figure, np.ndarray, float]:
@@ -366,15 +663,30 @@ def plot_sleep_data(
     ``fdc_start_time`` is the absolute local start time of the FDC1004
     recording. The FDC1004 file contains elapsed timestamps only.
     ``plots`` selects panels by name. Supported names are
-    ``sleep_stages``, ``heart_rate``, ``heart_rate_rmsdd``, ``capacitance``,
-    ``heart_rate_stft``,
-    ``capacitance_difference_mean``, ``rmsdd``, ``movement``, and
+    ``sleep_stages``, ``heart_rate``, ``heart_rate_rmsdd``,
+    ``heart_rate_rmsdd_30s``, ``heart_rate_stft``, ``capacitance``,
+    ``capacitance_difference_mean``, ``rmsdd``, ``rmsdd_30s``, ``movement``, and
     ``movement_count``. By default, all panels are shown.
 
     ``rmsdd_window_size`` is retained as a compatibility default for both
     RMSDD calculations. The dedicated window-size arguments override it.
     ``lf_hrv_moving_average_window_size`` enables trailing moving-average
     smoothing of the LF HRV plot when set to a positive integer.
+    ``polar_time_offset_seconds`` shifts Polar timestamps before plotting and
+    aligning them with the FDC data. Positive values shift them later.
+    ``epoch_step_seconds`` sets the stepping interval for constant-window
+    epoch evaluation (defaults to 30.0 seconds, aligning to Apple Watch).
+    ``epoch_calculation_window_seconds`` sets the duration of the data window
+    used to calculate RMSDD for each epoch (defaults to ``epoch_step_seconds``).
+    ``heart_rate_calculation_window_seconds`` overrides the calculation window
+    for the heart-rate RMSDD only (defaults to
+    ``epoch_calculation_window_seconds``); the step is unchanged.
+    ``epoch_window_alignment`` selects how the calculation window aligns with
+    the epoch step ('trailing', 'centered', or 'forward', defaults to 'trailing').
+    ``sleep_classification`` classifies each epoch from the 30s HR RMSDD (HRV)
+    and the capacitance RMSDD (max of CIN2 and CIN4) using the
+    ``hrv_threshold_*`` and ``c_rmsdd_threshold_*`` parameters (see
+    ``classify_sleep_stages``). The Polar offset is applied beforehand.
     """
     if heart_rate_rmsdd_window_size is None:
         heart_rate_rmsdd_window_size = rmsdd_window_size
@@ -388,6 +700,10 @@ def plot_sleep_data(
         raise ValueError("heart_rate_rmsdd_window_size must be a positive integer.")
     if not isinstance(capacitance_rmsdd_window_size, int) or capacitance_rmsdd_window_size < 1:
         raise ValueError("capacitance_rmsdd_window_size must be a positive integer.")
+    if not isinstance(polar_time_offset_seconds, (int, float)) or isinstance(
+        polar_time_offset_seconds, bool
+    ):
+        raise ValueError("polar_time_offset_seconds must be a number.")
     if (
         lf_hrv_moving_average_window_size is not None
         and (
@@ -405,9 +721,18 @@ def plot_sleep_data(
     #     raise ValueError(
     #         "capacitance_difference_mean_window_size must be a positive integer."
     #     )
-    plot_ylims = dict(plot_ylims or {})
+    normalized_plot_ylims = {
+        PLOT_ALIASES.get(k, k): v for k, v in (plot_ylims or {}).items()
+    }
+    plot_ylims = normalized_plot_ylims
     if rmsdd_ylim is not None:
         plot_ylims.setdefault("rmsdd", rmsdd_ylim)
+        plot_ylims.setdefault("rmsdd_30s", rmsdd_ylim)
+    if "heart_rate_rmsdd" in plot_ylims:
+        plot_ylims.setdefault("heart_rate_rmsdd_30s", plot_ylims["heart_rate_rmsdd"])
+    if "rmsdd" in plot_ylims:
+        plot_ylims.setdefault("rmsdd_30s", plot_ylims["rmsdd"])
+
     fixed_ylim_plots = {"sleep_stages", "movement"}
     configured_fixed_ylim_plots = set(plot_ylims) & fixed_ylim_plots
     if configured_fixed_ylim_plots:
@@ -420,7 +745,10 @@ def plot_sleep_data(
         raise ValueError(
             f"Unknown plot y-limit(s): {', '.join(sorted(unknown_ylim_plots))}."
         )
-    selected_plots = tuple(PLOT_NAMES if plots is None else plots)
+    selected_plots = tuple(
+        PLOT_ALIASES.get(name, name)
+        for name in (PLOT_NAMES if plots is None else plots)
+    )
     unknown_plots = set(selected_plots) - set(PLOT_NAMES)
     if unknown_plots:
         raise ValueError(
@@ -429,6 +757,15 @@ def plot_sleep_data(
         )
     if not selected_plots:
         raise ValueError("plots must contain at least one plot name.")
+    if "sleep_stages" in selected_plots and "sleep_classification" in selected_plots:
+        # Keep the classification directly under the Apple Watch stages.
+        selected_plots = tuple(
+            p for p in selected_plots if p != "sleep_classification"
+        )
+        index = selected_plots.index("sleep_stages") + 1
+        selected_plots = (
+            selected_plots[:index] + ("sleep_classification",) + selected_plots[index:]
+        )
 
     date_text = _date_text(analysis_date)
     root = (
@@ -450,10 +787,15 @@ def plot_sleep_data(
         )
 
     apple = _load_apple_watch(apple_path)
+    apple_original = apple.copy()
     polar_parts = []
     heart_rate_band_parts = []
     for polar_path in polar_paths:
         polar_part = _load_polar(polar_path)
+        polar_part["timestamp"] += pd.to_timedelta(
+            polar_time_offset_seconds,
+            unit="s",
+        )
         polar_part["heart_rate_rmsdd"] = _rolling_rmsdd(
             polar_part["HR (bpm)"],
             heart_rate_rmsdd_window_size,
@@ -499,6 +841,124 @@ def plot_sleep_data(
         cin4_threshold=cin4_threshold,
         heart_rate_rmsdd=heart_rate_rmsdd_by_timestamp,
     )
+    if epoch_window_seconds is not None:
+        if epoch_calculation_window_seconds is None:
+            epoch_calculation_window_seconds = epoch_window_seconds
+
+    if epoch_step_seconds <= 0:
+        raise ValueError("epoch_step_seconds must be positive.")
+    if epoch_calculation_window_seconds is None:
+        epoch_calculation_window_seconds = epoch_step_seconds
+    elif epoch_calculation_window_seconds <= 0:
+        raise ValueError("epoch_calculation_window_seconds must be positive.")
+    if heart_rate_calculation_window_seconds is None:
+        heart_rate_calculation_window_seconds = epoch_calculation_window_seconds
+    elif heart_rate_calculation_window_seconds <= 0:
+        raise ValueError("heart_rate_calculation_window_seconds must be positive.")
+    heart_rate_calculation_window_seconds = float(heart_rate_calculation_window_seconds)
+
+    valid_alignments = ("trailing", "centered", "forward")
+    if epoch_window_alignment not in valid_alignments:
+        raise ValueError(
+            f"Unknown epoch_window_alignment: {epoch_window_alignment}. "
+            f"Choose from: {', '.join(valid_alignments)}."
+        )
+
+    all_start_bound = min(raw_fdc["timestamp"].min(), polar["timestamp"].min())
+    all_end_bound = max(raw_fdc["timestamp"].max(), polar["timestamp"].max())
+    epochs = _build_30s_epochs(
+        apple_original,
+        start_bound=all_start_bound,
+        end_bound=all_end_bound,
+        epoch_duration_seconds=epoch_step_seconds,
+    )
+    epoch_starts = pd.to_datetime([e[0] for e in epochs]).values
+    epoch_ends = pd.to_datetime([e[1] for e in epochs]).values
+
+    # Determine calculation window bounds for each epoch
+    def _calc_bounds(window_seconds: float):
+        calc_delta = pd.to_timedelta(window_seconds, unit="s")
+        if window_seconds == epoch_step_seconds:
+            return epoch_starts, epoch_ends
+        if epoch_window_alignment == "trailing":
+            return (
+                (pd.to_datetime(epoch_ends) - calc_delta).values,
+                pd.to_datetime(epoch_ends).values,
+            )
+        if epoch_window_alignment == "centered":
+            epoch_mid = pd.to_datetime(epoch_starts) + (pd.to_datetime(epoch_ends) - pd.to_datetime(epoch_starts)) / 2
+            return (
+                (epoch_mid - calc_delta / 2).values,
+                (epoch_mid + calc_delta / 2).values,
+            )
+        return (
+            pd.to_datetime(epoch_starts).values,
+            (pd.to_datetime(epoch_starts) + calc_delta).values,
+        )
+
+    calc_starts, calc_ends = _calc_bounds(epoch_calculation_window_seconds)
+    hr_calc_starts, hr_calc_ends = _calc_bounds(heart_rate_calculation_window_seconds)
+
+    hr_epoch_rmsdd = _epoch_rmsdd(
+        polar["HR (bpm)"],
+        polar["timestamp"],
+        hr_calc_starts,
+        hr_calc_ends,
+    )
+    cin2_epoch_rmsdd = _epoch_rmsdd(
+        fdc["CIN2_pF"],
+        fdc["timestamp"],
+        calc_starts,
+        calc_ends,
+    )
+    cin4_epoch_rmsdd = _epoch_rmsdd(
+        fdc["CIN4_pF"],
+        fdc["timestamp"],
+        calc_starts,
+        calc_ends,
+    )
+
+    polar["heart_rate_rmsdd_30s"] = _map_epochs_to_timestamps(
+        polar["timestamp"],
+        epoch_starts,
+        epoch_ends,
+        hr_epoch_rmsdd,
+    )
+    fdc["CIN2_rmsdd_30s"] = _map_epochs_to_timestamps(
+        fdc["timestamp"],
+        epoch_starts,
+        epoch_ends,
+        cin2_epoch_rmsdd,
+    )
+    fdc["CIN4_rmsdd_30s"] = _map_epochs_to_timestamps(
+        fdc["timestamp"],
+        epoch_starts,
+        epoch_ends,
+        cin4_epoch_rmsdd,
+    )
+
+    if epochs:
+        epoch_plot_times = pd.to_datetime(
+            np.append(epoch_starts, epoch_ends[-1])
+        )
+        hr_epoch_plot_values = np.append(
+            hr_epoch_rmsdd,
+            hr_epoch_rmsdd[-1] if len(hr_epoch_rmsdd) else np.nan,
+        )
+        cin2_epoch_plot_values = np.append(
+            cin2_epoch_rmsdd,
+            cin2_epoch_rmsdd[-1] if len(cin2_epoch_rmsdd) else np.nan,
+        )
+        cin4_epoch_plot_values = np.append(
+            cin4_epoch_rmsdd,
+            cin4_epoch_rmsdd[-1] if len(cin4_epoch_rmsdd) else np.nan,
+        )
+    else:
+        epoch_plot_times = pd.Series([], dtype="datetime64[ns]")
+        hr_epoch_plot_values = np.array([], dtype=float)
+        cin2_epoch_plot_values = np.array([], dtype=float)
+        cin4_epoch_plot_values = np.array([], dtype=float)
+
     apple = _add_apple_boundary_awake(
         apple,
         fdc["timestamp"].min(),
@@ -522,30 +982,66 @@ def plot_sleep_data(
             window=lf_hrv_moving_average_window_size,
             min_periods=1,
         ).mean()
+    polar_marked = _mark_sleep_stages(polar, apple)
+    stft_df = pd.DataFrame(
+        {
+            "timestamp": heart_rate_band_times,
+            "low_frequency": low_frequency,
+            "high_frequency": high_frequency,
+        }
+    )
+    stft_df = _mark_sleep_stages(stft_df, apple)
+
     correlation = _movement_rem_correlation(fdc)
     print("Sleep-phase movement statistics:")
-    statistics = _sleep_stage_statistics(fdc)
+    statistics = _sleep_stage_statistics(fdc, polar=polar_marked, stft_df=stft_df)
     print(
         statistics.to_string(
             float_format=lambda value: f"{value:.2f}",
             formatters={
                 "mean_CIN2_rmsdd": lambda value: f"{value:.4f}",
                 "mean_CIN4_rmsdd": lambda value: f"{value:.4f}",
+                "mean C_2 RMSDD [pF]": lambda value: f"{value:.4f}",
+                "mean C_4 RMSDD [pF]": lambda value: f"{value:.4f}",
                 "average_movement_per_s": lambda value: f"{value:.4f}",
+                "average movement per second [1/s]": lambda value: f"{value:.4f}",
+                "mean HR [bpm]": lambda value: f"{value:.2f}",
+                "mean HR RMSDD [bpm]": lambda value: f"{value:.4f}",
+                "mean HR 30s RMSDD [bpm]": lambda value: f"{value:.4f}",
+                "mean LF HRV": lambda value: f"{value:.4f}",
+                "mean HF HRV": lambda value: f"{value:.4f}",
+                "mean CIN2 [pF]": lambda value: f"{value:.2f}",
+                "mean CIN4 [pF]": lambda value: f"{value:.2f}",
+                "mean C_2 30s RMSDD [pF]": lambda value: f"{value:.4f}",
+                "mean C_4 30s RMSDD [pF]": lambda value: f"{value:.4f}",
             },
         )
     )
+
+    classified = classify_sleep_stages(
+        hr_epoch_rmsdd,
+        np.fmax(cin2_epoch_rmsdd, cin4_epoch_rmsdd),
+        hrv_threshold_1=hrv_threshold_1,
+        hrv_threshold_2=hrv_threshold_2,
+        c_rmsdd_threshold_1=c_rmsdd_threshold_1,
+        c_rmsdd_threshold_2=c_rmsdd_threshold_2,
+    )
+    if "sleep_classification" in selected_plots:
+        _print_classification_comparison(classified, epoch_starts, epoch_ends, apple)
 
     height_ratios = {
         "sleep_stages": 1.4,
         "heart_rate": 1.2,
         "heart_rate_rmsdd": 1.2,
+        "heart_rate_rmsdd_30s": 1.2,
         "heart_rate_stft": 1.2,
         "capacitance": 2.0,
         # "capacitance_difference_mean": 1.5,
         "rmsdd": 1.5,
+        "rmsdd_30s": 1.5,
         "movement": 1.0,
         # "movement_count": 1.0,
+        "sleep_classification": 1.4,
     }
     figure, axes = plt.subplots(
         len(selected_plots),
@@ -616,6 +1112,25 @@ def plot_sleep_data(
             )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
+        elif plot_name == "heart_rate_rmsdd_30s":
+            hr_w = heart_rate_calculation_window_seconds
+            calc_w_str = f"{int(hr_w) if hr_w.is_integer() else hr_w}s"
+            axis.step(
+                epoch_plot_times,
+                hr_epoch_plot_values,
+                where="post",
+                color="tab:purple",
+                linewidth=1.0,
+                label=f"Heart-rate RMSDD ({calc_w_str} window)",
+            )
+            axis.set_ylabel("HR RMSDD (bpm)")
+            step_str = f"{int(epoch_step_seconds) if epoch_step_seconds.is_integer() else epoch_step_seconds}s"
+            if hr_w == epoch_step_seconds:
+                axis.set_title(f"Heart-rate RMSDD (constant {calc_w_str} window)")
+            else:
+                axis.set_title(f"Heart-rate RMSDD ({calc_w_str} window, {step_str} step)")
+            axis.legend(loc="upper right")
+            axis.grid(True, alpha=0.3)
         elif plot_name == "heart_rate_stft":
             axis.plot(
                 heart_rate_band_times,
@@ -681,6 +1196,59 @@ def plot_sleep_data(
             )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
+        elif plot_name == "rmsdd_30s":
+            calc_w_str = f"{int(epoch_calculation_window_seconds) if epoch_calculation_window_seconds.is_integer() else epoch_calculation_window_seconds}s"
+            step_str = f"{int(epoch_step_seconds) if epoch_step_seconds.is_integer() else epoch_step_seconds}s"
+            axis.step(
+                epoch_plot_times,
+                cin2_epoch_plot_values,
+                where="post",
+                label=f"CIN2 RMSDD ({calc_w_str})",
+                linewidth=0.8,
+            )
+            axis.step(
+                epoch_plot_times,
+                cin4_epoch_plot_values,
+                where="post",
+                label=f"CIN4 RMSDD ({calc_w_str})",
+                linewidth=0.8,
+            )
+            axis.axhline(cin2_threshold, color="tab:blue", linestyle="--", alpha=0.6)
+            axis.axhline(cin4_threshold, color="tab:orange", linestyle="--", alpha=0.6)
+            axis.set_ylabel("RMSDD (pF)")
+            if epoch_calculation_window_seconds == epoch_step_seconds:
+                axis.set_title(f"RMSDD (constant {calc_w_str} window)")
+            else:
+                axis.set_title(f"RMSDD ({calc_w_str} window, {step_str} step)")
+            axis.legend(loc="upper right")
+            axis.grid(True, alpha=0.3)
+        elif plot_name == "sleep_classification":
+            if len(classified):
+                class_values = np.append(classified, classified[-1])
+                for stage_number in range(len(SLEEP_STAGE_LABELS)):
+                    axis.axhspan(
+                        stage_number - 0.5,
+                        stage_number + 0.5,
+                        color=SLEEP_STAGE_COLORS[stage_number],
+                        alpha=0.35,
+                    )
+                axis.step(
+                    epoch_plot_times,
+                    class_values,
+                    where="post",
+                    color="black",
+                    linewidth=1.0,
+                )
+            axis.set_ylabel("Sleep stage")
+            axis.set_title(
+                "Classified sleep stages "
+                f"(HRV thr: {hrv_threshold_1}/{hrv_threshold_2}, "
+                f"C RMSDD thr: {c_rmsdd_threshold_1}/{c_rmsdd_threshold_2})"
+            )
+            axis.set_yticks(range(len(SLEEP_STAGE_LABELS)))
+            axis.set_yticklabels(SLEEP_STAGE_LABELS)
+            axis.set_ylim(len(SLEEP_STAGE_LABELS) - 0.5, -0.5)
+            axis.grid(True, axis="x", alpha=0.3)
         elif plot_name == "movement":
             movement_levels = fdc["movement_prediction"].map(
                 {state: index for index, state in enumerate(MOVEMENT_STATES)}
