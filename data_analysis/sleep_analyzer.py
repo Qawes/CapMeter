@@ -36,6 +36,7 @@ PLOT_NAMES = (
     "movement",
     # "movement_count",
     "sleep_classification",
+    "cnn_sleep_stages",
 )
 PLOT_ALIASES = {
     "heart_rate_epoch_rmsdd": "heart_rate_rmsdd_30s",
@@ -47,6 +48,46 @@ PLOT_ALIASES = {
     "fdc_epoch_rmsdd": "rmsdd_30s",
 }
 MOVEMENT_STATES = ("still", "movement", "strong movement")
+LANGUAGES = ("en", "hu")
+# Plot texts are written in English; this maps them to Hungarian. Texts may be
+# str.format templates (see ``tr`` in plot_sleep_data).
+HUNGARIAN_TEXT = {
+    "Awake": "Ébrenlét",
+    "Core": "Könnyű",
+    "Deep": "Mély",
+    "still": "Nyugalom",
+    "movement": "Mozgás",
+    "strong movement": "Erős mozgás",
+    "Sleep stage": "Alvási fázis",
+    "Sleep stages ({date})": "Apple Watch alvási fázisok",
+    "CNN-predicted sleep stages ({date})": "Neurális háló \u00e1ltal becs\u00fclt alv\u00e1si f\u00e1zisok",
+    "Heart rate": "Pulzus",
+    "HR (bpm)": "Pulzus (1/perc)",
+    "Polar heart rate": "Pulzus",
+    "Heart-rate RMSDD": "Pulzus RMSSD",
+    "HR RMSDD (bpm)": "Pulzus RMSSD (1/perc)",
+    "Heart-rate RMSDD (window size: {size})": "Pulzus RMSSD (ablakméret: {size})",
+    "Heart-rate RMSDD ({window} window)": "Pulzus RMSSD ({window} ablak)",
+    "Heart-rate RMSDD (constant {window} window)": "Pulzus RMSSD (állandó {window} ablak)",
+    "Heart-rate RMSDD ({window} window, {step} step)": "Pulzus RMSSD ({window} ablak, {step} lépés)",
+    "LF amplitude (0.04-0.15 Hz)": "LF amplitúdó (0,04-0,15 Hz)",
+    "HF amplitude (0.15-0.4 Hz)": "HF amplitúdó (0,15-0,4 Hz)",
+    "Integrated amplitude": "Integrált amplitúdó",
+    "HRV calculated with STFT": "STFT-vel számolt HRV",
+    "Capacitance (pF)": "Kapacitás (pF)",
+    "FDC1004 capacitance": "Szemszenzor kapacitás",
+    "RMSDD (window size: {size})": "Kapacitás RMSSD (ablakméret: {size})",
+    "RMSDD (constant {window} window)": "Kapacitás RMSsD (állandó {window} ablak)",
+    "RMSDD ({window} window, {step} step)": "Kapacitás RMSSD ({window} ablak, {step} lépés)",
+    "Classified sleep stages (HRV thr: {h1}/{h2}, C RMSSD thr: {c1}/{c2})": (
+        "Szabályalapú algoritmus szerinti alvási fázisok"
+    ),
+    "Predicted movement": "Becsült mozgás",
+    "Movement": "Mozgás",
+    "Movement prediction (REM correlation: {value:.4f})": "Mozgásbecslés",
+    "Movement prediction (REM correlation: undefined)": "Mozgásbecslés",
+    "Local time": "Helyi idő",
+}
 STRONG_MOVEMENT_THRESHOLD = 0.7
 HEART_RATE_RMSDD_MOVEMENT_THRESHOLD = 0.7
 
@@ -652,11 +693,18 @@ def plot_sleep_data(
     plot_ylims: Mapping[str, tuple[float, float]] | None = None,
     cin2_threshold: float = 0.065,
     cin4_threshold: float = 0.09,
+    strong_movement_threshold: float = STRONG_MOVEMENT_THRESHOLD,
+    hr_rmsdd_movement_threshold: float = HEART_RATE_RMSDD_MOVEMENT_THRESHOLD,
     hrv_threshold_1: float = 1.0,
     hrv_threshold_2: float = 0.5,
     c_rmsdd_threshold_1: float = 0.09,
     c_rmsdd_threshold_2: float = 0.03,
     plots: Sequence[str] | None = None,
+    exclude_plots: Sequence[str] | None = None,
+    language: str = "en",
+    cnn_predictions_path: str | Path | None = None,
+    crop_start_seconds: float = 0.0,
+    crop_end_seconds: float = 0.0,
     show: bool = True,
 ) -> tuple[plt.Figure, np.ndarray, float]:
     """Plot one date's datasets and return the figure, axes, and REM correlation.
@@ -668,6 +716,8 @@ def plot_sleep_data(
     ``heart_rate_rmsdd_30s``, ``heart_rate_stft``, ``capacitance``,
     ``capacitance_difference_mean``, ``rmsdd``, ``rmsdd_30s``, ``movement``, and
     ``movement_count``. By default, all panels are shown.
+    ``exclude_plots`` suppresses the named panels (applied after ``plots``), e.g.
+    ``exclude_plots=["capacitance", "rmsdd"]`` shows everything else.
 
     ``rmsdd_window_size`` is retained as a compatibility default for both
     RMSDD calculations. The dedicated window-size arguments override it.
@@ -684,6 +734,20 @@ def plot_sleep_data(
     ``epoch_calculation_window_seconds``); the step is unchanged.
     ``capacitance_calculation_window_seconds`` does the same for the
     capacitance RMSDD only.
+    The movement prediction uses the constant-window (30 s) RMSDD values: an
+    epoch is "movement" if CIN2 RMSDD > ``cin2_threshold`` or CIN4 RMSDD >
+    ``cin4_threshold``, and "strong movement" if either exceeds
+    ``strong_movement_threshold``. Epochs whose heart-rate RMSDD is below
+    ``hr_rmsdd_movement_threshold`` are set to "still".
+    ``crop_start_seconds`` and ``crop_end_seconds`` crop the plotted time range
+    by that many seconds from the left and right side (view only; the
+    calculations and statistics still use all data).
+    ``language`` ("en" or "hu") selects the language of the plot texts.
+    ``cnn_sleep_stages`` plots the stages predicted by the neural network from
+    ``cnn_predictions_path`` (defaults to
+    ``<data_directory>/cnn_predicted_data/<date>.csv``, same format as the Apple
+    Watch files). When ``plots`` is not given, the panel is skipped if that file
+    does not exist.
     ``epoch_window_alignment`` selects how the calculation window aligns with
     the epoch step ('trailing', 'centered', or 'forward', defaults to 'trailing').
     ``sleep_classification`` classifies each epoch from the 30s HR RMSDD (HRV)
@@ -736,7 +800,7 @@ def plot_sleep_data(
     if "rmsdd" in plot_ylims:
         plot_ylims.setdefault("rmsdd_30s", plot_ylims["rmsdd"])
 
-    fixed_ylim_plots = {"sleep_stages", "movement"}
+    fixed_ylim_plots = {"sleep_stages", "cnn_sleep_stages", "movement"}
     configured_fixed_ylim_plots = set(plot_ylims) & fixed_ylim_plots
     if configured_fixed_ylim_plots:
         raise ValueError(
@@ -758,17 +822,39 @@ def plot_sleep_data(
             f"Unknown plot(s): {', '.join(sorted(unknown_plots))}. "
             f"Choose from: {', '.join(PLOT_NAMES)}."
         )
+    excluded_plots = tuple(PLOT_ALIASES.get(name, name) for name in (exclude_plots or ()))
+    unknown_excluded = set(excluded_plots) - set(PLOT_NAMES)
+    if unknown_excluded:
+        raise ValueError(
+            f"Unknown plot(s) in exclude_plots: {', '.join(sorted(unknown_excluded))}. "
+            f"Choose from: {', '.join(PLOT_NAMES)}."
+        )
+    selected_plots = tuple(name for name in selected_plots if name not in excluded_plots)
     if not selected_plots:
-        raise ValueError("plots must contain at least one plot name.")
-    if "sleep_stages" in selected_plots and "sleep_classification" in selected_plots:
-        # Keep the classification directly under the Apple Watch stages.
-        selected_plots = tuple(
-            p for p in selected_plots if p != "sleep_classification"
-        )
-        index = selected_plots.index("sleep_stages") + 1
-        selected_plots = (
-            selected_plots[:index] + ("sleep_classification",) + selected_plots[index:]
-        )
+        raise ValueError("At least one plot must remain after applying plots and exclude_plots.")
+    # Keep the stage panels together: Apple Watch stages, then the classification,
+    # then the CNN-predicted stages.
+    anchor = "sleep_stages"
+    for name in ("sleep_classification", "cnn_sleep_stages"):
+        if anchor in selected_plots and name in selected_plots:
+            selected_plots = tuple(p for p in selected_plots if p != name)
+            index = selected_plots.index(anchor) + 1
+            selected_plots = selected_plots[:index] + (name,) + selected_plots[index:]
+        if name in selected_plots:
+            anchor = name
+
+    if crop_start_seconds < 0 or crop_end_seconds < 0:
+        raise ValueError("crop_start_seconds and crop_end_seconds must be non-negative.")
+    if language not in LANGUAGES:
+        raise ValueError(f"Unknown language: {language}. Choose from: {', '.join(LANGUAGES)}.")
+
+    def tr(text: str, **values: object) -> str:
+        if language == "hu":
+            text = HUNGARIAN_TEXT.get(text, text)
+        return text.format(**values)
+
+    stage_labels = [tr(label) for label in SLEEP_STAGE_LABELS]
+    movement_labels = [tr(state) for state in MOVEMENT_STATES]
 
     date_text = _date_text(analysis_date)
     root = (
@@ -777,6 +863,16 @@ def plot_sleep_data(
         else Path(__file__).parent / "sleep_tests"
     )
     apple_path = root / "apple_watch_data" / f"{date_text}.csv"
+    cnn_path = (
+        Path(cnn_predictions_path)
+        if cnn_predictions_path is not None
+        else root / "cnn_predicted_data" / f"{date_text}.csv"
+    )
+    if "cnn_sleep_stages" in selected_plots and not cnn_path.is_file():
+        if plots is None:
+            selected_plots = tuple(p for p in selected_plots if p != "cnn_sleep_stages")
+        else:
+            raise FileNotFoundError(f"CNN prediction file not found: {cnn_path}")
     fdc_path = root / "fdc1004_data" / f"fdc1004_data_{date_text.replace('-', '_')}.csv"
     polar_paths = sorted((root / "Polar_data").glob(f"polar_{date_text}_*.CSV"))
 
@@ -791,6 +887,9 @@ def plot_sleep_data(
 
     apple = _load_apple_watch(apple_path)
     apple_original = apple.copy()
+    cnn_stages = (
+        _load_apple_watch(cnn_path) if "cnn_sleep_stages" in selected_plots else None
+    )
     polar_parts = []
     heart_rate_band_parts = []
     for polar_path in polar_paths:
@@ -945,6 +1044,28 @@ def plot_sleep_data(
         cin4_epoch_rmsdd,
     )
 
+    # Movement prediction from the constant-window (30 s) RMSDD values.
+    hr_rmsdd_at_fdc = _map_epochs_to_timestamps(
+        fdc["timestamp"],
+        epoch_starts,
+        epoch_ends,
+        hr_epoch_rmsdd,
+    )
+    movement_30s = (fdc["CIN2_rmsdd_30s"] > cin2_threshold) | (
+        fdc["CIN4_rmsdd_30s"] > cin4_threshold
+    )
+    strong_movement_30s = (fdc["CIN2_rmsdd_30s"] > strong_movement_threshold) | (
+        fdc["CIN4_rmsdd_30s"] > strong_movement_threshold
+    )
+    low_heart_rate_rmsdd_30s = pd.Series(hr_rmsdd_at_fdc, index=fdc.index) < hr_rmsdd_movement_threshold
+    movement_30s = movement_30s & ~low_heart_rate_rmsdd_30s
+    strong_movement_30s = strong_movement_30s & ~low_heart_rate_rmsdd_30s
+    fdc["movement_prediction"] = np.select(
+        [strong_movement_30s.to_numpy(), movement_30s.to_numpy()],
+        ["strong movement", "movement"],
+        default="still",
+    )
+
     if epochs:
         epoch_plot_times = pd.to_datetime(
             np.append(epoch_starts, epoch_ends[-1])
@@ -1050,11 +1171,12 @@ def plot_sleep_data(
         "movement": 1.0,
         # "movement_count": 1.0,
         "sleep_classification": 1.4,
+        "cnn_sleep_stages": 1.4,
     }
     figure, axes = plt.subplots(
         len(selected_plots),
         1,
-        figsize=(16, 3 * len(selected_plots)),
+        figsize=(10, 1.5* len(selected_plots)),
         sharex=True,
         gridspec_kw={
             "height_ratios": [height_ratios[name] for name in selected_plots]
@@ -1087,10 +1209,10 @@ def plot_sleep_data(
                     linewidth=1.0,
                 )
                 previous_stage_number = stage_number
-            axis.set_ylabel("Sleep stage")
-            axis.set_title(f"Sleep stages ({date_text})")
+            axis.set_ylabel(tr("Sleep stage"))
+            axis.set_title(tr("Sleep stages ({date})", date=date_text))
             axis.set_yticks(range(len(SLEEP_STAGE_LABELS)))
-            axis.set_yticklabels(SLEEP_STAGE_LABELS)
+            axis.set_yticklabels(stage_labels)
             axis.set_ylim(len(SLEEP_STAGE_LABELS) - 0.5, -0.5)
             axis.grid(True, axis="x", alpha=0.3)
         elif plot_name == "heart_rate":
@@ -1100,10 +1222,10 @@ def plot_sleep_data(
                 polar_valid["HR (bpm)"],
                 color="tab:red",
                 linewidth=1,
-                label="Heart rate",
+                label=tr("Heart rate"),
             )
-            axis.set_ylabel("HR (bpm)")
-            axis.set_title("Polar heart rate")
+            axis.set_ylabel(tr("HR (bpm)"))
+            axis.set_title(tr("Polar heart rate"))
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
         elif plot_name == "heart_rate_rmsdd":
@@ -1112,11 +1234,11 @@ def plot_sleep_data(
                 heart_rate_rmsdd,
                 color="tab:purple",
                 linewidth=1,
-                label="Heart-rate RMSDD",
+                label=tr("Heart-rate RMSDD"),
             )
-            axis.set_ylabel("HR RMSDD (bpm)")
+            axis.set_ylabel(tr("HR RMSDD (bpm)"))
             axis.set_title(
-                f"Heart-rate RMSDD (window size: {heart_rate_rmsdd_window_size})"
+                tr("Heart-rate RMSDD (window size: {size})", size=heart_rate_rmsdd_window_size)
             )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
@@ -1129,14 +1251,16 @@ def plot_sleep_data(
                 where="post",
                 color="tab:purple",
                 linewidth=1.0,
-                label=f"Heart-rate RMSDD ({calc_w_str} window)",
+                label=tr("Heart-rate RMSDD ({window} window)", window=calc_w_str),
             )
-            axis.set_ylabel("HR RMSDD (bpm)")
+            axis.set_ylabel(tr("HR RMSDD (bpm)"))
             step_str = f"{int(epoch_step_seconds) if epoch_step_seconds.is_integer() else epoch_step_seconds}s"
             if hr_w == epoch_step_seconds:
-                axis.set_title(f"Heart-rate RMSDD (constant {calc_w_str} window)")
+                axis.set_title(tr("Heart-rate RMSDD (constant {window} window)", window=calc_w_str))
             else:
-                axis.set_title(f"Heart-rate RMSDD ({calc_w_str} window, {step_str} step)")
+                axis.set_title(
+                    tr("Heart-rate RMSDD ({window} window, {step} step)", window=calc_w_str, step=step_str)
+                )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
         elif plot_name == "heart_rate_stft":
@@ -1145,24 +1269,24 @@ def plot_sleep_data(
                 low_frequency,
                 color="tab:blue",
                 linewidth=1.0,
-                label="LF amplitude (0.04-0.15 Hz)",
+                label=tr("LF amplitude (0.04-0.15 Hz)"),
             )
             axis.plot(
                 heart_rate_band_times,
                 high_frequency,
                 color="tab:orange",
                 linewidth=1.0,
-                label="HF amplitude (0.15-0.4 Hz)",
+                label=tr("HF amplitude (0.15-0.4 Hz)"),
             )
-            axis.set_ylabel("Integrated amplitude")
-            axis.set_title("HRV calculated with STFT")
+            axis.set_ylabel(tr("Integrated amplitude"))
+            axis.set_title(tr("HRV calculated with STFT"))
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
         elif plot_name == "capacitance":
-            axis.plot(fdc["timestamp"], fdc["CIN2_pF"], label="CIN2", linewidth=0.8)
-            axis.plot(fdc["timestamp"], fdc["CIN4_pF"], label="CIN4", linewidth=0.8)
-            axis.set_ylabel("Capacitance (pF)")
-            axis.set_title("FDC1004 capacitance")
+            axis.plot(fdc["timestamp"], fdc["CIN2_pF"], label="Jobb csatorna", linewidth=0.8)
+            axis.plot(fdc["timestamp"], fdc["CIN4_pF"], label="Bal csatorna", linewidth=0.8)
+            axis.set_ylabel(tr("Capacitance (pF)"))
+            axis.set_title(tr("FDC1004 capacitance"))
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
         # elif plot_name == "capacitance_difference_mean":
@@ -1194,13 +1318,13 @@ def plot_sleep_data(
         #     axis.legend(loc="upper right")
         #     axis.grid(True, alpha=0.3)
         elif plot_name == "rmsdd":
-            axis.plot(fdc["timestamp"], fdc["CIN2_rmsdd"], label="CIN2 RMSDD", linewidth=0.8)
-            axis.plot(fdc["timestamp"], fdc["CIN4_rmsdd"], label="CIN4 RMSDD", linewidth=0.8)
+            axis.plot(fdc["timestamp"], fdc["CIN2_rmsdd"], label="Jobb csatorna RMSDD", linewidth=0.8)
+            axis.plot(fdc["timestamp"], fdc["CIN4_rmsdd"], label="Bal csatorna RMSDD", linewidth=0.8)
             axis.axhline(cin2_threshold, color="tab:blue", linestyle="--", alpha=0.6)
             axis.axhline(cin4_threshold, color="tab:orange", linestyle="--", alpha=0.6)
             axis.set_ylabel("RMSDD (pF)")
             axis.set_title(
-                f"RMSDD (window size: {capacitance_rmsdd_window_size})"
+                tr("RMSDD (window size: {size})", size=capacitance_rmsdd_window_size)
             )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
@@ -1212,25 +1336,60 @@ def plot_sleep_data(
                 epoch_plot_times,
                 cin2_epoch_plot_values,
                 where="post",
-                label=f"CIN2 RMSDD ({calc_w_str})",
+                label=f"Jobb csatorna RMSDD ({calc_w_str})",
                 linewidth=0.8,
             )
             axis.step(
                 epoch_plot_times,
                 cin4_epoch_plot_values,
                 where="post",
-                label=f"CIN4 RMSDD ({calc_w_str})",
+                label=f"Bal csatorna RMSDD ({calc_w_str})",
                 linewidth=0.8,
             )
             axis.axhline(cin2_threshold, color="tab:blue", linestyle="--", alpha=0.6)
             axis.axhline(cin4_threshold, color="tab:orange", linestyle="--", alpha=0.6)
             axis.set_ylabel("RMSDD (pF)")
             if cap_w == epoch_step_seconds:
-                axis.set_title(f"RMSDD (constant {calc_w_str} window)")
+                axis.set_title(tr("RMSDD (constant {window} window)", window=calc_w_str))
             else:
-                axis.set_title(f"RMSDD ({calc_w_str} window, {step_str} step)")
+                axis.set_title(
+                    tr("RMSDD ({window} window, {step} step)", window=calc_w_str, step=step_str)
+                )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
+        elif plot_name == "cnn_sleep_stages":
+            for stage_number in range(len(SLEEP_STAGE_LABELS)):
+                axis.axhspan(
+                    stage_number - 0.5,
+                    stage_number + 0.5,
+                    color=SLEEP_STAGE_COLORS[stage_number],
+                    alpha=0.35,
+                )
+            previous_stage_number = None
+            previous_end = None
+            for row in cnn_stages.itertuples():
+                stage_number = SLEEP_STAGE_NAMES[row._1]
+                if previous_stage_number is not None and previous_end == row._2:
+                    axis.plot(
+                        [row._2, row._2],
+                        [previous_stage_number, stage_number],
+                        color="black",
+                        linewidth=1.0,
+                    )
+                axis.plot(
+                    [row._2, row._3],
+                    [stage_number, stage_number],
+                    color="black",
+                    linewidth=1.0,
+                )
+                previous_stage_number = stage_number
+                previous_end = row._3
+            axis.set_ylabel(tr("Sleep stage"))
+            axis.set_title(tr("CNN-predicted sleep stages ({date})", date=date_text))
+            axis.set_yticks(range(len(SLEEP_STAGE_LABELS)))
+            axis.set_yticklabels(stage_labels)
+            axis.set_ylim(len(SLEEP_STAGE_LABELS) - 0.5, -0.5)
+            axis.grid(True, axis="x", alpha=0.3)
         elif plot_name == "sleep_classification":
             if len(classified):
                 class_values = np.append(classified, classified[-1])
@@ -1248,14 +1407,18 @@ def plot_sleep_data(
                     color="black",
                     linewidth=1.0,
                 )
-            axis.set_ylabel("Sleep stage")
+            axis.set_ylabel(tr("Sleep stage"))
             axis.set_title(
-                "Classified sleep stages "
-                f"(HRV thr: {hrv_threshold_1}/{hrv_threshold_2}, "
-                f"C RMSDD thr: {c_rmsdd_threshold_1}/{c_rmsdd_threshold_2})"
+                tr(
+                    "Classified sleep stages (HRV thr: {h1}/{h2}, C RMSDD thr: {c1}/{c2})",
+                    h1=hrv_threshold_1,
+                    h2=hrv_threshold_2,
+                    c1=c_rmsdd_threshold_1,
+                    c2=c_rmsdd_threshold_2,
+                )
             )
             axis.set_yticks(range(len(SLEEP_STAGE_LABELS)))
-            axis.set_yticklabels(SLEEP_STAGE_LABELS)
+            axis.set_yticklabels(stage_labels)
             axis.set_ylim(len(SLEEP_STAGE_LABELS) - 0.5, -0.5)
             axis.grid(True, axis="x", alpha=0.3)
         elif plot_name == "movement":
@@ -1268,7 +1431,7 @@ def plot_sleep_data(
                 where="post",
                 color="tab:green",
                 linewidth=1.2,
-                label="Predicted movement",
+                label=tr("Predicted movement"),
             )
             axis.fill_between(
                 fdc["timestamp"],
@@ -1278,14 +1441,14 @@ def plot_sleep_data(
                 color="tab:green",
                 alpha=0.25,
             )
-            axis.set_ylabel("Movement")
+            axis.set_ylabel(tr("Movement"))
             axis.set_yticks(range(len(MOVEMENT_STATES)))
-            axis.set_yticklabels(MOVEMENT_STATES)
+            axis.set_yticklabels(movement_labels)
             axis.set_ylim(-0.1, len(MOVEMENT_STATES) - 0.9)
             axis.set_title(
-                f"Movement prediction (REM correlation: {correlation:.4f})"
+                tr("Movement prediction (REM correlation: {value:.4f})", value=correlation)
                 if np.isfinite(correlation)
-                else "Movement prediction (REM correlation: undefined)"
+                else tr("Movement prediction (REM correlation: undefined)")
             )
             axis.legend(loc="upper right")
             axis.grid(True, alpha=0.3)
@@ -1316,8 +1479,12 @@ def plot_sleep_data(
             fdc["timestamp"],
         ]
     ).dropna()
-    axes[-1].set_xlim(all_times.min(), all_times.max())
-    axes[-1].set_xlabel("Local time")
+    x_min = all_times.min() + pd.Timedelta(seconds=crop_start_seconds)
+    x_max = all_times.max() - pd.Timedelta(seconds=crop_end_seconds)
+    if x_min >= x_max:
+        raise ValueError("crop_start_seconds and crop_end_seconds remove the whole plot.")
+    axes[-1].set_xlim(x_min, x_max)
+    axes[-1].set_xlabel(tr("Local time"))
     axes[-1].xaxis.set_major_locator(mdates.MinuteLocator(interval=15))
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     figure.autofmt_xdate()
