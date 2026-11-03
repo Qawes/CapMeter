@@ -145,6 +145,6 @@ end_announcement = np.rint(
 audio_data = np.concatenate(
     (first_block_audio, block_break, second_block_audio, end_announcement)
 )
-filename = f'Functional_tests/alvas_1_teszt_{LANGUAGE}_seed_{random_seed}.wav'
+filename = f'data_analysis/functional_tests/audio_files/alvas_1_teszt_{LANGUAGE}_seed_{random_seed}.wav'
 wavfile.write(filename, 44100, audio_data)
 print("Hangsáv sikeresen legyártva!")
